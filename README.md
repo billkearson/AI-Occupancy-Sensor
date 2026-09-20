@@ -197,23 +197,6 @@ Field notes:
 - `README.md` is the quick-start and operational guide.
 - `config.h` and `config.h.example` hold the local network and runtime settings.
 
-## Status
-
-Implemented:
-
-- Sensor acquisition for C4002, ENS160, and BME280.
-- Basic room-context inference.
-- Main loop orchestration and logging.
-- Stabilized C4002 UART framing and continuous polling in the Arduino sketch.
-
-Still stubbed or incomplete:
-
-1. Real MQTT publishing and Home Assistant discovery payloads.
-2. Real HTTP API responses.
-3. Real MCP resource/tool responses.
-4. Final threshold tuning for occupancy and air-quality recommendations.
-5. Board-specific configuration cleanup for the exact hardware revision.
-
 ## MCP tool contract
 
 Current MCP tool names advertised by tools/list in AI_Occupancy_Sensor.ino:

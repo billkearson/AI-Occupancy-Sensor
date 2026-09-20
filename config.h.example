@@ -1,0 +1,28 @@
+#pragma once
+
+#include <stdint.h>
+
+// Copy this file to config.h and fill in your local values before compiling.
+// Keep secrets out of shared repositories.
+
+// Wi‑Fi settings
+static const char WIFI_SSID[] = "<YOUR_WIFI_SSID>";
+static const char WIFI_PASSWORD[] = "<YOUR_WIFI_PASSWORD>";
+
+// MCP HTTP endpoint for exposing room data to the host system.
+constexpr uint16_t MCP_HTTP_PORT = <MCP_HTTP_PORT>;
+
+// MQTT broker settings
+static const char MQTT_BROKER_HOST[] = "<MQTT_BROKER_HOST>";
+constexpr uint16_t MQTT_BROKER_PORT = <MQTT_BROKER_PORT>;
+static const char MQTT_USERNAME[] = "<MQTT_USERNAME>";
+static const char MQTT_PASSWORD[] = "<MQTT_PASSWORD>";
+
+// MQTT topics
+static const char MQTT_TOPIC_STATE[] = "<MQTT_TOPIC_STATE>";
+static const char MQTT_TOPIC_AVAILABILITY[] = "<MQTT_TOPIC_AVAILABILITY>";
+
+// Environmental sensor correction offsets.
+// Positive values increase reported readings; negative values reduce them.
+constexpr float TEMP_OFFSET_F = 0.0f;
+constexpr float HUMIDITY_OFFSET_RH = 0.0f;

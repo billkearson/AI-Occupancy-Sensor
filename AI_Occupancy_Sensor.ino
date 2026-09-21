@@ -1,3 +1,14 @@
+/*
+  AI Occupancy Sensor
+  ESP32-C6 + C4002 mmWave Sensor + ENS160 + BME280
+  Monitors motion, presence, room occupancy, and air quality.
+  Includes WiFi connectivity, web server, MCP, and MQTT reporting.
+
+  Project: AI Occupancy Sensor
+  Author: Bill
+  Date: 2026-09-21
+*/
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
@@ -109,6 +120,7 @@ public:
     uint32_t rejected_unknown_note = 0;
   };
 
+  // Initialize the UART connection to the C4002 sensor and store the serial settings.
   bool begin(HardwareSerial &serial, uint8_t rxPin, uint8_t txPin, uint32_t baudRate) {
     serial_ = &serial;
     rxPin_ = rxPin;
@@ -119,6 +131,7 @@ public:
     return true;
   }
 
+  // Reset the C4002 to a known-good configuration after a stale or invalid reading.
   bool reinitialize() {
     if (serial_ == nullptr) {
       return false;
@@ -151,35 +164,42 @@ public:
     return ok;
   }
 
+  // Detect a sensor state that looks like a reset or invalid all-zero packet instead of a real reading.
   static bool isZeroedState(const C4002State &state) {
     return state.valid && !state.motion && !state.presence && state.distance_cm == 0 && state.energy == 0;
   }
 
+  // Configure how often the C4002 emits report frames to the UART bus.
   bool setReportPeriod(uint8_t period) {
     uint8_t payload[5] = {CMD_SET_REPORT_PERIOD, 0x00, 0x05, 0x00, period};
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Set the C4002 ranging resolution for the configured detection distance window.
   bool setResolutionMode(ResolutionMode mode) {
     uint8_t payload[5] = {CMD_GET_AND_SET_RESOLUTION_MODE, 0x00, 0x05, 0x00, uint8_t(mode)};
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Turn the run LED on or off to indicate the sensor is active or idle.
   bool setRunLedState(LedMode mode) {
     uint8_t payload[6] = {CMD_SET_LED_MODE, 0x00, 0x06, 0x00, uint8_t(mode), LED_KEEP};
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Set the output LED state used by the sensor's reporting behavior.
   bool setOutLedState(LedMode mode) {
     uint8_t payload[6] = {CMD_SET_LED_MODE, 0x00, 0x06, 0x00, LED_KEEP, uint8_t(mode)};
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Configure which output pin mode the C4002 uses for target events.
   bool setOutPinMode(OutPinMode mode) {
     uint8_t payload[5] = {CMD_CONFIG_OUT_MODE, 0x00, 0x05, 0x00, uint8_t(mode)};
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Set the ambient-light threshold used by the C4002 for motion processing.
   bool setLightThresh(float thresholdLux) {
     const uint16_t threshold = uint16_t(thresholdLux * 10.0f);
     uint8_t payload[6] = {
@@ -193,6 +213,7 @@ public:
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Set how long a target remains considered present after it disappears from the sensor field.
   bool setTargetDisappearDelay(uint16_t seconds) {
     uint8_t payload[6] = {
       CMD_TARGET_DISAPPEAR_DELAY,
@@ -205,6 +226,7 @@ public:
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Configure the distance gate array used for motion and presence detection windows.
   bool configureGate(uint8_t gateType, const uint8_t *gateData, size_t gateCount) {
     if (gateData == nullptr || gateCount == 0 || gateCount > 25) {
       return false;
@@ -225,6 +247,7 @@ public:
     return sendCommand(payload, dataLen, FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Configure the target detection range for the C4002 in centimeters.
   bool setDetectRange(uint16_t closestCm, uint16_t farthestCm) {
     if (closestCm > farthestCm || farthestCm > 1100) {
       return false;
@@ -242,6 +265,7 @@ public:
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
+  // Wait for the next valid C4002 notification frame and decode it into a normalized sensor state.
   bool waitForNotification(C4002State &state, uint32_t timeoutMs) {
     const uint32_t startMs = millis();
     while ((millis() - startMs) < timeoutMs) {
@@ -257,6 +281,7 @@ public:
     return false;
   }
 
+  // Return the current packet and parsing diagnostics for debugging UART health.
   Diagnostics diagnostics() const {
     return diagnostics_;
   }
@@ -268,6 +293,7 @@ private:
   uint32_t baudRate_ = 115200;
   Diagnostics diagnostics_ = {};
 
+  // Build and send a framed write/read request to the C4002 and wait for the acknowledgement response.
   bool sendCommand(const uint8_t *payload, size_t payloadLen, uint8_t frameType) {
     if (serial_ == nullptr || payload == nullptr || payloadLen == 0) {
       return false;
@@ -296,6 +322,7 @@ private:
     return waitForAck(200);
   }
 
+  // Wait for the C4002 to acknowledge a write command before continuing.
   bool waitForAck(uint32_t timeoutMs) {
     const uint32_t startMs = millis();
     while ((millis() - startMs) < timeoutMs) {
@@ -320,6 +347,7 @@ private:
     return false;
   }
 
+  // Read a raw UART packet from the sensor, skipping malformed frames until a valid one is found.
   bool readPacket(uint8_t *buffer, size_t bufferLen, size_t &actualLen, uint32_t timeoutMs) {
     if (buffer == nullptr || bufferLen == 0 || serial_ == nullptr) {
       return false;
@@ -382,6 +410,7 @@ private:
     return actualLen > 0;
   }
 
+  // Decode a C4002 notification frame into motion, presence, distance, and energy values.
   bool parseNotification(const uint8_t *packet, size_t packetLen, C4002State &state) {
     if (packet == nullptr || packetLen < 12) {
       return false;
@@ -443,6 +472,7 @@ private:
     return true;
   }
 
+  // Compute the 16-bit checksum used by the C4002 UART protocol.
   uint16_t checksum(const uint8_t *data, size_t len) const {
     uint32_t sum = 0;
     for (size_t i = 0; i < len; ++i) {
@@ -454,6 +484,7 @@ private:
 
 class Ens160Driver {
 public:
+  // Initialize the ENS160 sensor, verify the device ID, and enable the measurement mode.
   bool begin() {
     uint8_t partId[2] = {0};
     if (!readRegister(0x00, partId, sizeof(partId))) {
@@ -469,6 +500,7 @@ public:
     return true;
   }
 
+  // Read the latest eCO2, TVOC, and AQI values from the ENS160 sensor.
   bool read(uint16_t &eco2, uint16_t &tvoc, uint8_t &aqi) {
     if (!initialized_) {
       return false;
@@ -511,6 +543,7 @@ private:
     return true;
   }
 
+  // Write a single register value to the ENS160 sensor over I2C.
   bool writeRegister(uint8_t reg, uint8_t value) {
     Wire.beginTransmission(0x53);
     Wire.write(reg);
@@ -521,6 +554,7 @@ private:
 
 class Bme280Driver {
 public:
+  // Initialize the BME280, verify the device ID, and configure the measurement mode.
   bool begin() {
     uint8_t chipId = 0;
     if (!readRegister(0xD0, &chipId, 1) || chipId != 0x60) {
@@ -553,6 +587,7 @@ public:
     return true;
   }
 
+  // Read compensation-corrected temperature, humidity, and pressure values from the BME280.
   bool read(float &temperatureC, float &humidityRH, float &pressureHpa) {
     if (!initialized_) {
       return false;
@@ -624,6 +659,7 @@ private:
     return true;
   }
 
+  // Write a single register value into the BME280 configuration registers.
   bool writeRegister(uint8_t reg, uint8_t value) {
     Wire.beginTransmission(0x76);
     Wire.write(reg);
@@ -631,6 +667,7 @@ private:
     return Wire.endTransmission(true) == 0;
   }
 
+  // Load the factory calibration coefficients needed to convert raw BME280 samples to real-world units.
   bool readCalibration() {
     uint8_t calib1[26] = {0};
     uint8_t humidity1 = 0;
@@ -670,6 +707,7 @@ private:
     return true;
   }
 
+  // Convert raw BME280 sensor data into calibrated temperature, humidity, and pressure readings.
   void compensate(int32_t rawTemperature, int32_t rawHumidity, int32_t rawPressure, float &temperatureC, float &humidityRH, float &pressureHpa) {
     const int32_t var1 = (((rawTemperature >> 3) - (int32_t(calibration_.dig_t1) << 1)) * int32_t(calibration_.dig_t2)) >> 11;
     const int32_t var2 = (((((rawTemperature >> 4) - int32_t(calibration_.dig_t1)) * ((rawTemperature >> 4) - int32_t(calibration_.dig_t1))) >> 12) * int32_t(calibration_.dig_t3)) >> 14;
@@ -712,6 +750,7 @@ private:
 
 class ContextEngine {
 public:
+  // Convert the full sensor snapshot into a room-level occupancy and air-quality context.
   void update(const SensorSnapshot &snapshot) {
     current_.occupied = snapshot.c4002_present;
     current_.moving = snapshot.motion_detected;
@@ -724,6 +763,7 @@ public:
     current_.ventilation_recommended = current_.occupied && current_.air_quality_warning;
   }
 
+  // Return the latest room context for the MQTT, HTTP, and serial reporting layers.
   RoomContext snapshot() const {
     return current_;
   }
@@ -749,6 +789,7 @@ bool mqttEnabled = false;
 uint32_t lastMqttReconnectAttemptMs = 0;
 char mqttBrokerHost[128] = {0};
 
+// Convert the MQTT client status code into a readable diagnostic label.
 const char *mqttStateText(int state) {
   switch (state) {
     case -4:
@@ -776,6 +817,7 @@ const char *mqttStateText(int state) {
   }
 }
 
+// Strip any scheme prefix or trailing slash from the configured MQTT broker host.
 void normalizeBrokerHost(const char *input, char *output, size_t outputLen) {
   if (output == nullptr || outputLen == 0) {
     return;
@@ -806,6 +848,7 @@ void normalizeBrokerHost(const char *input, char *output, size_t outputLen) {
   output[len] = '\0';
 }
 
+// Escape JSON control characters so sensor data can be embedded inside MCP responses safely.
 String jsonEscape(const String &in) {
   String out;
   out.reserve(in.length() + 32);
@@ -827,6 +870,7 @@ String jsonEscape(const String &in) {
   return out;
 }
 
+// Pull a JSON string field from a message body without needing a full parser.
 String extractJsonStringField(const String &json, const char *field) {
   const String key = String("\"") + field + "\"";
   const int keyPos = json.indexOf(key);
@@ -852,6 +896,7 @@ String extractJsonStringField(const String &json, const char *field) {
   return json.substring(firstQuote + 1, secondQuote);
 }
 
+// Extract the JSON-RPC id field so responses can echo the caller's request id.
 String extractJsonIdToken(const String &json) {
   const String key = "\"id\"";
   const int keyPos = json.indexOf(key);
@@ -887,6 +932,7 @@ String extractJsonIdToken(const String &json) {
   return json.substring(valueStart, valueEnd);
 }
 
+// Build the latest room context payload used by MQTT, HTTP, and MCP responses.
 String buildContextJson() {
   const RoomContext room = contextEngine.snapshot();
   const float distanceFt = snapshot.distance_m * 3.28084f;
@@ -914,6 +960,7 @@ String buildContextJson() {
   return String(buf);
 }
 
+// Send a structured JSON-RPC error payload for invalid MCP requests or tool calls.
 void sendMcpError(const String &idToken, int code, const char *message) {
   String resp = String("{\"jsonrpc\":\"2.0\",\"id\":") + idToken +
                 String(",\"error\":{\"code\":") + code +
@@ -921,6 +968,7 @@ void sendMcpError(const String &idToken, int code, const char *message) {
   mcpHttpServer.send(200, "application/json", resp);
 }
 
+// Handle incoming MCP JSON-RPC requests for initialize, tools/list, resources/list, and data reads.
 void handleMcpPost() {
   const String body = mcpHttpServer.arg("plain");
   const String idToken = extractJsonIdToken(body);
@@ -1053,6 +1101,7 @@ void handleMcpPost() {
   sendMcpError(idToken, -32601, "Method not found");
 }
 
+// Start the local MCP/HTTP server once Wi-Fi is connected and expose sensor data over HTTP.
 void setupMcpHttpServer() {
   if (strlen(WIFI_SSID) == 0) {
     Serial.println("MCP HTTP disabled: WIFI_SSID is empty");
@@ -1087,6 +1136,7 @@ void setupMcpHttpServer() {
   Serial.printf("MCP HTTP ready: http://%s:%u/mcp\n", WiFi.localIP().toString().c_str(), MCP_HTTP_PORT);
 }
 
+// Configure the MQTT client only when a broker host and Wi-Fi link are available.
 void setupMqttClient() {
   if (strlen(MQTT_BROKER_HOST) == 0) {
     Serial.println("MQTT disabled: MQTT_BROKER_HOST is empty");
@@ -1113,6 +1163,7 @@ void setupMqttClient() {
                 MQTT_TOPIC_STATE);
 }
 
+// Maintain the MQTT connection state and reconnect with a throttled retry interval.
 void ensureMqttConnected() {
   if (!mqttEnabled || mqttClient.connected()) {
     return;
@@ -1154,6 +1205,7 @@ void ensureMqttConnected() {
   }
 }
 
+// Publish the most recent room context to the configured MQTT state topic.
 void publishMqttState() {
   if (!mqttEnabled || !mqttClient.connected()) {
     return;
@@ -1165,6 +1217,7 @@ void publishMqttState() {
   }
 }
 
+// Print a compact human-readable summary of the current sensor snapshot to the serial monitor.
 void printSensorSnapshot(const SensorSnapshot &s) {
   const float distanceFt = s.distance_m * 3.28084f;
   const float temperatureF = (s.temperature_c * 9.0f / 5.0f) + 32.0f;
@@ -1190,6 +1243,7 @@ void printSensorSnapshot(const SensorSnapshot &s) {
 
 }
 
+// Arduino setup routine: initialize hardware, configure sensor drivers, and start network interfaces.
 void setup() {
   // Board startup sequence:
   // 1) open the serial console for logs,
@@ -1260,6 +1314,7 @@ void setup() {
   Serial.flush();
 }
 
+// Main execution loop: service HTTP requests, maintain sensor health, refresh readings, and publish state.
 void loop() {
   // Handle any incoming MCP HTTP requests while the node is running.
   if (mcpHttpEnabled) {

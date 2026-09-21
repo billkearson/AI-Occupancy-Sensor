@@ -95,6 +95,17 @@ These defaults are defined in [config.h](config.h):
 - MCP HTTP port: `8081`
 - MQTT broker host and Wi‑Fi credentials: blank placeholders for local configuration
 
+## Case fasteners
+
+The 3D-printed enclosure uses the following hardware:
+
+- Sensor mounting screws: M2 x 6 mm
+- Sensor mounting screws: M2 x 8 mm
+- Case assembly hex head bolts: M2 x 12 mm
+- Case assembly threaded inserts: M2 x 4 x 3.5 mm
+
+The M2 x 6 mm and M2 x 8 mm screws were used to attach the sensors to the case. The M2 x 12 mm hex head bolts and M2 x 4 x 3.5 mm threaded inserts were used to secure the case panels together.
+
 ## Power note for the C4002
 
 The C4002 required more power than the ESP32 board could reliably supply through its GPIO header pins alone. In the current build, the sensor is powered from the ESP32 board's USB 5V rail via a red tap wire visible in the back-case photo. This is a deliberate external power feed for the sensor and is not provided through the ESP32's GPIO pin supply path.

@@ -179,6 +179,17 @@ The BME280 and ENS160 share the I²C bus.
 
 The project now includes real build photos, printable enclosure STL files in the `case/` folder, and an Open WebUI screenshot under `images/`:
 
+### Case hardware fasteners
+
+The 3D-printed enclosure uses the following mounting hardware:
+
+- Sensor mounting screws: M2 x 6 mm
+- Sensor mounting screws: M2 x 8 mm
+- Case assembly hex head bolts: M2 x 12 mm
+- Case assembly threaded inserts: M2 x 4 x 3.5 mm
+
+The M2 x 6 mm and M2 x 8 mm screws were used to attach the sensors to the case. The M2 x 12 mm hex head bolts and M2 x 4 x 3.5 mm threaded inserts were used to secure the case panels together.
+
 ### 3D printable case files
 
 - [case/Case3_front.stl](case/Case3_front.stl)

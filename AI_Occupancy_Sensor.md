@@ -57,48 +57,39 @@ The architecture is deliberately **local-first**. No cloud service is required.
 
 # 2. High-Level Architecture
 
-```text
-                         ROOM
-                          │
-          ┌───────────────┼────────────────┐
-          │               │                │
-          ▼               ▼                ▼
-      ┌────────┐      ┌────────┐      ┌────────┐
-      │ C4002  │      │ ENS160 │      │ BME280 │
-      │ mmWave │      │ Air    │      │ Temp   │
-      │        │      │ Quality│      │ RH     │
-      │Presence│      │ TVOC   │      │Pressure│
-      │Motion  │      │ eCO2   │      │        │
-      └───┬────┘      └───┬────┘      └───┬────┘
-          │ UART           │ I²C           │ I²C
-          └────────────────┼────────────────┘
-                           │
-                           ▼
-                ┌──────────────────────┐
-                │    ESP32-C6          │
-                │                      │
-                │ Sensor Manager       │
-                │ Feature Engine       │
-                │ Context Engine       │
-                │ Event Engine         │
-                │ History Buffer       │
-                │ MQTT Client          │
-                │ HTTP Server          │
-                │ MCP Server            │
-                └───────┬───────┬──────┘
-                        │       │
-                  MQTT  │       │ HTTP
-                        │       │
-                ┌───────▼───┐   │
-                │   Home    │   │
-                │ Assistant │   │
-                └───────────┘   │
-                                │
-                         ┌──────▼───────┐
-                         │ MCP Client   │
-                         │ / AI Agent   │
-                         └──────────────┘
+```mermaid
+flowchart LR
+    ROOM[Room]
+
+    C4002[C4002 mmWave
+Presence + Motion]
+    ENS[ENS160
+Air quality]
+    BME[BME280
+Temperature / Humidity / Pressure]
+
+    ESP[FireBeetle 2 ESP32-C6
+Sensor Manager
+Feature Engine
+Context Engine
+MQTT + HTTP + MCP]
+
+    HA[Home Assistant]
+    MCP[MCP Client / AI Agent]
+
+    ROOM --> C4002
+    ROOM --> ENS
+    ROOM --> BME
+
+    C4002 -->|UART| ESP
+    ENS -->|I²C| ESP
+    BME -->|I²C| ESP
+
+    ESP -->|MQTT| HA
+    ESP -->|HTTP / JSON| MCP
+    ESP -->|MCP Streamable HTTP| MCP
 ```
+
 
 The important architectural constraint is:
 
@@ -251,38 +242,44 @@ This screenshot shows the sensor data exposed in Home Assistant:
 
 ---
 
-# 4. Proposed Wiring
+# 4. Actual Wiring
 
-Use the FireBeetle 2 ESP32-C6 I²C pins:
+This is the actual hardware wiring currently used in the project.
 
-```text
-ESP32-C6
-GPIO19 / SDA ────────── ENS160 SDA
-                  └──── BME280 SDA
+```mermaid
+flowchart LR
+    subgraph ESP[FireBeetle 2 ESP32-C6]
+        direction TB
+        VCC3[3V3]
+        GND_TOP[GND]
+        SDA[GPIO19 / SDA]
+        SCL[GPIO20 / SCL]
+        TX[GPIO16 / UART TX]
+        RX[GPIO17 / UART RX]
+        GND_BOTTOM[GND]
+        VCC5[5V]
+    end
 
-GPIO20 / SCL ────────── ENS160 SCL
-                  └──── BME280 SCL
+    ENV[ENS160 + BME280
+Combined Environmental Sensor
+I²C: SDA / SCL / 3V3 / GND]
+    C4002[C4002 mmWave Sensor
+UART: RX / TX / GND
+5V power tap]
 
-3V3 ─────────────────── ENS160 VCC
-  └──────────────────── BME280 VCC
+    VCC3 -->|3V3| ENV
+    GND_TOP -->|GND| ENV
 
-GND ─────────────────── ENS160 GND
-  └──────────────────── BME280 GND
+    SDA -->|I²C SDA| ENV
+    SCL -->|I²C SCL| ENV
+
+    TX -->|ESP32 TX -> C4002 RX| C4002
+    RX -->|ESP32 RX <- C4002 TX| C4002
+    GND_BOTTOM -->|GND| C4002
+    VCC5 -->|USB 5V tap| C4002
 ```
 
-DFRobot documents GPIO19 as SDA and GPIO20 as SCL on the FireBeetle 2 ESP32-C6. Verify the exact board revision before final assembly. ([Espressif Systems][1])
-
-Use a hardware UART for the C4002:
-
-```text
-ESP32-C6 UART TX ───── C4002 RX
-ESP32-C6 UART RX ───── C4002 TX
-GND ────────────────── C4002 GND
-```
-
-The exact UART GPIO assignment should remain a board configuration value rather than being scattered throughout the firmware.
-
-Current default mapping: ESP32-C6 UART TX = GPIO 16 and ESP32-C6 UART RX = GPIO 17.
+The board uses the FireBeetle 2 ESP32-C6 I²C pins `GPIO19` (SDA) and `GPIO20` (SCL). The default UART mapping for the C4002 is `GPIO16` as TX and `GPIO17` as RX. These values are defined in the firmware and kept in a single configuration location rather than being scattered across the code.
 
 Network settings are centralized in the shared [config.h](config.h) file. This includes Wi‑Fi, MQTT broker details, and the MCP HTTP port so the project has a single source of truth instead of duplicate values in multiple files.
 
@@ -342,30 +339,35 @@ The current repository is intentionally Arduino-first and does not keep a separa
 
 Use FreeRTOS tasks to keep sensor acquisition independent from network activity.
 
-```text
-                    ESP32-C6
-                       │
-       ┌───────────────┼────────────────┐
-       │               │                │
-       ▼               ▼                ▼
- C4002 Task       Environment Task   Network Task
-       │               │                │
-       ▼               ▼                │
- Radar State       Env State             │
-       │               │                │
-       └───────┬───────┘                │
-               ▼                        │
-        Feature Engine                  │
-               │                        │
-               ▼                        │
-        Context Engine                  │
-               │                        │
-               ▼                        │
-          Event Engine ─────────────────┤
-               │                        │
-        ┌──────┴──────┐                 │
-        ▼             ▼                 ▼
-      MQTT          History          HTTP/MCP
+```mermaid
+flowchart TD
+    ESP[ESP32-C6]
+
+    C4002[C4002 Task
+Radar state]
+    ENV[Environment Task
+Env state]
+    NET[Network Task]
+
+    FE[Feature Engine]
+    CE[Context Engine]
+    EE[Event Engine]
+    MQTT[MQTT]
+    HIST[History]
+    HTTP[MCP / HTTP]
+
+    ESP --> C4002
+    ESP --> ENV
+    ESP --> NET
+
+    C4002 --> FE
+    ENV --> FE
+    FE --> CE
+    CE --> EE
+
+    EE --> MQTT
+    EE --> HIST
+    EE --> HTTP
 ```
 
 Recommended starting rates:

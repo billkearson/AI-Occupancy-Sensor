@@ -95,6 +95,43 @@ These defaults are defined in [config.h](config.h):
 - MCP HTTP port: `8081`
 - MQTT broker host and Wi‑Fi credentials: blank placeholders for local configuration
 
+## Wiring diagram
+
+```mermaid
+flowchart LR
+    subgraph ESP[FireBeetle 2 ESP32-C6]
+        direction TB
+        VCC3[3V3]
+        GND_TOP[GND]
+        SDA[GPIO19 / SDA]
+        SCL[GPIO20 / SCL]
+        TX[GPIO16 / UART TX]
+        RX[GPIO17 / UART RX]
+        GND_BOTTOM[GND]
+        VCC5[5V]
+    end
+
+    ENV[ENS160 + BME280
+Combined Environmental Sensor
+I²C: SDA / SCL / 3V3 / GND]
+    C4002[C4002 mmWave Sensor
+UART: RX / TX / GND
+5V power tap]
+
+    VCC3 -->|3V3| ENV
+    GND_TOP -->|GND| ENV
+
+    SDA -->|I²C SDA| ENV
+    SCL -->|I²C SCL| ENV
+
+    TX -->|ESP32 TX -> C4002 RX| C4002
+    RX -->|ESP32 RX <- C4002 TX| C4002
+    GND_BOTTOM -->|GND| C4002
+    VCC5 -->|USB 5V tap| C4002
+```
+
+This is the current actual wiring used by the project: the ENS160 and BME280 share the same I²C bus, the C4002 uses the board UART, and the C4002 receives a dedicated 5V tap from the ESP32 USB rail for stable operation.
+
 ## Case fasteners
 
 The 3D-printed enclosure uses the following hardware:

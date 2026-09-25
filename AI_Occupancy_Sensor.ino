@@ -14,6 +14,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <PubSubClient.h>
+#include <stdlib.h>
+#include <time.h>
 #include "config.h"
 
 // Pin assignments for the ESP32-C6 board and connected sensors.
@@ -51,7 +53,7 @@ struct SensorSnapshot {
   float temperature_c = 0.0f;
   float humidity_rh = 0.0f;
   float pressure_hpa = 0.0f;
-  uint32_t timestamp_ms = 0;
+  uint64_t timestamp_ms = 0;
 };
 
 struct RoomContext {
@@ -66,6 +68,18 @@ struct RoomContext {
   float eco2_ppm = 0.0f;
   float tvoc_ppb = 0.0f;
 };
+
+struct OccupancyHistoryEntry {
+  uint64_t timestamp_ms = 0;
+  bool time_source_ntp = false;
+  bool occupied = false;
+  bool moving = false;
+  bool stationary = false;
+  float distance_ft = 0.0f;
+  int energy = 0;
+};
+
+constexpr size_t OCCUPANCY_HISTORY_DEPTH = 10;
 
 // Driver for the DFRobot C4002 mmWave sensor.
 // It wraps the UART packet framing, command payloads, and notification parsing
@@ -788,6 +802,176 @@ PubSubClient mqttClient(mqttNetClient);
 bool mqttEnabled = false;
 uint32_t lastMqttReconnectAttemptMs = 0;
 char mqttBrokerHost[128] = {0};
+bool ntpTimeAvailable = false;
+char ntpPrimaryServer[64] = {0};
+char ntpSecondaryServer[64] = {0};
+bool ntpSyncConfigured = false;
+bool ntpSyncAttemptActive = false;
+uint32_t ntpSyncStartMs = 0;
+uint32_t ntpLastAttemptMs = 0;
+char activeTimeZone[96] = "UTC0";
+OccupancyHistoryEntry occupancyHistory[OCCUPANCY_HISTORY_DEPTH] = {};
+size_t occupancyHistoryCount = 0;
+size_t occupancyHistoryNext = 0;
+bool occupancyEdgeStateInitialized = false;
+bool lastRecordedOccupiedState = false;
+
+// Apply configured timezone; fall back to UTC if missing or invalid.
+void applyConfiguredTimeZone() {
+  const char *const fallbackTz = "UTC0";
+  const char *requestedTz = TIMEZONE;
+
+  bool useFallback = (requestedTz == nullptr || requestedTz[0] == '\0');
+  const char *candidateTz = useFallback ? fallbackTz : requestedTz;
+
+  if (setenv("TZ", candidateTz, 1) != 0) {
+    useFallback = true;
+    candidateTz = fallbackTz;
+    setenv("TZ", candidateTz, 1);
+  }
+
+  tzset();
+
+  if (!useFallback && (tzname[0] == nullptr || tzname[0][0] == '\0')) {
+    useFallback = true;
+    candidateTz = fallbackTz;
+    setenv("TZ", candidateTz, 1);
+    tzset();
+  }
+
+  std::snprintf(activeTimeZone, sizeof(activeTimeZone), "%s", candidateTz);
+  if (useFallback) {
+    Serial.printf("Timezone fallback applied: %s\n", activeTimeZone);
+  } else {
+    Serial.printf("Timezone configured: %s\n", activeTimeZone);
+  }
+}
+
+// Parse a comma-delimited NTP server list into primary and secondary hostnames.
+void parseNtpServers(const char *csv, char *primary, size_t primaryLen, char *secondary, size_t secondaryLen) {
+  if (primary == nullptr || primaryLen == 0 || secondary == nullptr || secondaryLen == 0) {
+    return;
+  }
+
+  primary[0] = '\0';
+  secondary[0] = '\0';
+
+  if (csv == nullptr || csv[0] == '\0') {
+    return;
+  }
+
+  auto copyTrimmedToken = [](const char *start, size_t len, char *dest, size_t destLen) {
+    while (len > 0 && (*start == ' ' || *start == '\t')) {
+      start++;
+      len--;
+    }
+    while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t')) {
+      len--;
+    }
+    if (destLen == 0) {
+      return;
+    }
+    if (len >= destLen) {
+      len = destLen - 1;
+    }
+    if (len > 0) {
+      memcpy(dest, start, len);
+    }
+    dest[len] = '\0';
+  };
+
+  const char *comma = strchr(csv, ',');
+  if (comma == nullptr) {
+    copyTrimmedToken(csv, strlen(csv), primary, primaryLen);
+    return;
+  }
+
+  copyTrimmedToken(csv, size_t(comma - csv), primary, primaryLen);
+  copyTrimmedToken(comma + 1, strlen(comma + 1), secondary, secondaryLen);
+}
+
+// Return NTP time when available; otherwise keep legacy uptime-millis behavior.
+uint64_t currentTimestampMs() {
+  if (ntpTimeAvailable) {
+    const time_t now = time(nullptr);
+    if (now > 1000000000) {
+      return uint64_t(now) * 1000ULL;
+    }
+    ntpTimeAvailable = false;
+  }
+  return uint64_t(millis());
+}
+
+// Start an asynchronous NTP synchronization attempt when networking is available.
+void initializeNtpTime() {
+  if (WiFi.status() != WL_CONNECTED) {
+    ntpTimeAvailable = false;
+    return;
+  }
+
+  if (!ntpSyncConfigured) {
+    parseNtpServers(NTP_SERVERS, ntpPrimaryServer, sizeof(ntpPrimaryServer), ntpSecondaryServer, sizeof(ntpSecondaryServer));
+    ntpSyncConfigured = true;
+  }
+
+  if (ntpPrimaryServer[0] == '\0') {
+    Serial.println("NTP disabled: NTP_SERVERS is empty");
+    ntpTimeAvailable = false;
+    return;
+  }
+
+  if (ntpTimeAvailable || ntpSyncAttemptActive) {
+    return;
+  }
+
+  const char *secondary = (ntpSecondaryServer[0] != '\0') ? ntpSecondaryServer : nullptr;
+  configTime(0, 0, ntpPrimaryServer, secondary);
+  applyConfiguredTimeZone();
+  ntpSyncAttemptActive = true;
+  ntpSyncStartMs = millis();
+  ntpLastAttemptMs = ntpSyncStartMs;
+  Serial.printf("NTP sync started using %s", ntpPrimaryServer);
+  if (secondary != nullptr) {
+    Serial.printf(", %s", secondary);
+  }
+  Serial.println();
+}
+
+// Check NTP sync status without blocking loop execution.
+void pollNtpTime() {
+  if (WiFi.status() != WL_CONNECTED) {
+    ntpTimeAvailable = false;
+    ntpSyncAttemptActive = false;
+    return;
+  }
+
+  if (!ntpTimeAvailable && !ntpSyncAttemptActive) {
+    const uint32_t nowMs = millis();
+    if ((nowMs - ntpLastAttemptMs) >= 60000UL) {
+      initializeNtpTime();
+    }
+    return;
+  }
+
+  if (!ntpSyncAttemptActive) {
+    return;
+  }
+
+  const time_t now = time(nullptr);
+  if (now > 1000000000) {
+    ntpTimeAvailable = true;
+    ntpSyncAttemptActive = false;
+    Serial.println("NTP time synchronized; using internet time reference");
+    return;
+  }
+
+  const uint32_t elapsedMs = millis() - ntpSyncStartMs;
+  if (elapsedMs >= 10000UL) {
+    ntpTimeAvailable = false;
+    ntpSyncAttemptActive = false;
+    Serial.println("NTP sync timeout; using uptime milliseconds for now");
+  }
+}
 
 // Convert the MQTT client status code into a readable diagnostic label.
 const char *mqttStateText(int state) {
@@ -938,13 +1122,15 @@ String buildContextJson() {
   const float distanceFt = snapshot.distance_m * 3.28084f;
   const float temperatureF = (snapshot.temperature_c * 9.0f / 5.0f) + 32.0f;
   const float pressureInHg = snapshot.pressure_hpa * 0.0295299830714f;
+  const String timestampText = buildSampleTimeText(snapshot, ntpTimeAvailable);
 
   char buf[640] = {0};
   std::snprintf(
       buf,
       sizeof(buf),
-      "{\"timestamp_ms\":%lu,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"ventilation_recommended\":%s,\"air_quality_warning\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"eco2_ppm\":%.0f,\"tvoc_ppb\":%.0f,\"temperature_f\":%.2f,\"humidity_rh\":%.2f,\"pressure_inhg\":%.2f}",
-      static_cast<unsigned long>(snapshot.timestamp_ms),
+      "{\"timestamp\":\"%s\",\"time_source_ntp\":%s,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"ventilation_recommended\":%s,\"air_quality_warning\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"eco2_ppm\":%.0f,\"tvoc_ppb\":%.0f,\"temperature_f\":%.2f,\"humidity_rh\":%.2f,\"pressure_inhg\":%.2f}",
+      timestampText.c_str(),
+      ntpTimeAvailable ? "true" : "false",
       room.occupied ? "true" : "false",
       room.moving ? "true" : "false",
       room.stationary ? "true" : "false",
@@ -958,6 +1144,95 @@ String buildContextJson() {
       snapshot.humidity_rh,
       pressureInHg);
   return String(buf);
+}
+
+// Add one occupancy sample only when occupied flips, keeping only the latest depth entries.
+void recordOccupancyHistory(const SensorSnapshot &sensor, const RoomContext &room) {
+  if (!occupancyEdgeStateInitialized) {
+    lastRecordedOccupiedState = room.occupied;
+    occupancyEdgeStateInitialized = true;
+    return;
+  }
+
+  if (room.occupied == lastRecordedOccupiedState) {
+    return;
+  }
+
+  lastRecordedOccupiedState = room.occupied;
+
+  OccupancyHistoryEntry &slot = occupancyHistory[occupancyHistoryNext];
+  slot.timestamp_ms = sensor.timestamp_ms;
+  slot.time_source_ntp = ntpTimeAvailable;
+  slot.occupied = room.occupied;
+  slot.moving = room.moving;
+  slot.stationary = room.stationary;
+  slot.distance_ft = sensor.distance_m * 3.28084f;
+  slot.energy = sensor.energy_level;
+
+  occupancyHistoryNext = (occupancyHistoryNext + 1) % OCCUPANCY_HISTORY_DEPTH;
+  if (occupancyHistoryCount < OCCUPANCY_HISTORY_DEPTH) {
+    occupancyHistoryCount++;
+  }
+}
+
+// Build the occupancy history JSON from oldest to newest for API and MCP consumers.
+String buildOccupancyHistoryJson() {
+  String out;
+  out.reserve(2200);
+  out = String("{\"depth\":") + String(static_cast<unsigned>(OCCUPANCY_HISTORY_DEPTH)) +
+        String(",\"count\":") + String(static_cast<unsigned>(occupancyHistoryCount)) +
+        String(",\"entries\":[");
+
+  const size_t start = (occupancyHistoryNext + OCCUPANCY_HISTORY_DEPTH - occupancyHistoryCount) % OCCUPANCY_HISTORY_DEPTH;
+  for (size_t i = 0; i < occupancyHistoryCount; ++i) {
+    const size_t idx = (start + i) % OCCUPANCY_HISTORY_DEPTH;
+    const OccupancyHistoryEntry &entry = occupancyHistory[idx];
+    SensorSnapshot entrySnapshot = {};
+    entrySnapshot.timestamp_ms = entry.timestamp_ms;
+    const String entryTimestampText = buildSampleTimeText(entrySnapshot, entry.time_source_ntp);
+
+    char entryBuf[220] = {0};
+    std::snprintf(
+      entryBuf,
+      sizeof(entryBuf),
+      "{\"timestamp\":\"%s\",\"time_source_ntp\":%s,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"distance_ft\":%.2f,\"energy\":%d}",
+      entryTimestampText.c_str(),
+      entry.time_source_ntp ? "true" : "false",
+      entry.occupied ? "true" : "false",
+      entry.moving ? "true" : "false",
+      entry.stationary ? "true" : "false",
+      entry.distance_ft,
+      entry.energy);
+
+    if (i > 0) {
+      out += ',';
+    }
+    out += entryBuf;
+  }
+
+  out += "]}";
+  return out;
+}
+
+// Format sample time for serial logs using NTP wall clock when synced, otherwise uptime milliseconds.
+String buildSampleTimeText(const SensorSnapshot &sensor, bool useNtpTime) {
+  if (useNtpTime) {
+    const time_t sampleTime = static_cast<time_t>(sensor.timestamp_ms / 1000ULL);
+    if (sampleTime > 1000000000) {
+      struct tm localTime = {};
+      localtime_r(&sampleTime, &localTime);
+      char timeBuf[40] = {0};
+      strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S%z", &localTime);
+      return String(timeBuf);
+    }
+  }
+
+  char uptimeBuf[32] = {0};
+  std::snprintf(uptimeBuf,
+                sizeof(uptimeBuf),
+                "%llums",
+                static_cast<unsigned long long>(sensor.timestamp_ms));
+  return String(uptimeBuf);
 }
 
 // Send a structured JSON-RPC error payload for invalid MCP requests or tool calls.
@@ -992,7 +1267,8 @@ void handleMcpPost() {
                   "{\"name\":\"get_area_data\",\"description\":\"Returns the current real-time environmental metrics (temperature, humidity, pressure, CO2, and TVOC levels) and human occupancy metrics (present, motion, static, distance, energy) for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
                   "{\"name\":\"get_environmental_data\",\"description\":\"Returns temperature, humidity, and pressure metrics for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
                   "{\"name\":\"get_occupancy_data\",\"description\":\"Returns human occupancy metrics (present, motion, static, distance, energy) for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
-                  "{\"name\":\"get_air_quality_data\",\"description\":\"Returns CO2 and TVOC levels for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}}"
+                  "{\"name\":\"get_air_quality_data\",\"description\":\"Returns CO2 and TVOC levels for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+                  "{\"name\":\"get_occupancy_history\",\"description\":\"Returns the most recent occupancy history entries (depth 10, oldest to newest)\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}}"
                   "]}}";
     mcpHttpServer.send(200, "application/json", resp);
     return;
@@ -1000,23 +1276,26 @@ void handleMcpPost() {
 
   if (method == "resources/list") {
     String resp = String("{\"jsonrpc\":\"2.0\",\"id\":") + idToken +
-                  ",\"result\":{\"resources\":[{\"uri\":\"room://context/current\",\"name\":\"Current Room Context\",\"mimeType\":\"application/json\"}]}}";
+                  ",\"result\":{\"resources\":[{\"uri\":\"room://context/current\",\"name\":\"Current Room Context\",\"mimeType\":\"application/json\"},{\"uri\":\"room://occupancy/history\",\"name\":\"Occupancy History\",\"mimeType\":\"application/json\"}]}}";
     mcpHttpServer.send(200, "application/json", resp);
     return;
   }
 
   if (method == "resources/read") {
-    const String contextJson = buildContextJson();
-    const String escaped = jsonEscape(contextJson);
+    const String resourceUri = extractJsonStringField(body, "uri");
+    const bool readHistory = (resourceUri == "room://occupancy/history");
+    const String payloadJson = readHistory ? buildOccupancyHistoryJson() : buildContextJson();
+    const String responseUri = readHistory ? String("room://occupancy/history") : String("room://context/current");
+    const String escaped = jsonEscape(payloadJson);
     String resp = String("{\"jsonrpc\":\"2.0\",\"id\":") + idToken +
-                  ",\"result\":{\"contents\":[{\"uri\":\"room://context/current\",\"mimeType\":\"application/json\",\"text\":\"" + escaped + "\"}]}}";
+                  ",\"result\":{\"contents\":[{\"uri\":\"" + responseUri + "\",\"mimeType\":\"application/json\",\"text\":\"" + escaped + "\"}]}}";
     mcpHttpServer.send(200, "application/json", resp);
     return;
   }
 
   if (method == "tools/call") {
     const String toolName = extractJsonStringField(body, "name");
-    if (toolName != "get_area_data" && toolName != "get_environmental_data" && toolName != "get_occupancy_data" && toolName != "get_air_quality_data") {
+    if (toolName != "get_area_data" && toolName != "get_environmental_data" && toolName != "get_occupancy_data" && toolName != "get_air_quality_data" && toolName != "get_occupancy_history") {
       sendMcpError(idToken, -32601, "Tool not found");
       return;
     }
@@ -1082,6 +1361,18 @@ void handleMcpPost() {
       return;
     }
 
+    if (toolName == "get_occupancy_history") {
+      const String historyJson = buildOccupancyHistoryJson();
+      const String escaped = jsonEscape(historyJson);
+
+      String resp = String("{\"jsonrpc\":\"2.0\",\"id\":") + idToken +
+                    ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + escaped + "\"}],\"structuredContent\":" +
+                    historyJson +
+                    ",\"isError\":false}}";
+      mcpHttpServer.send(200, "application/json", resp);
+      return;
+    }
+
     const String contextJson = buildContextJson();
     const String escaped = jsonEscape(contextJson);
     String resp = String("{\"jsonrpc\":\"2.0\",\"id\":") + idToken +
@@ -1125,6 +1416,10 @@ void setupMcpHttpServer() {
     mcpHttpServer.send(200, "application/json", buildContextJson());
   });
 
+  mcpHttpServer.on("/occupancy/history", HTTP_METHOD_GET, []() {
+    mcpHttpServer.send(200, "application/json", buildOccupancyHistoryJson());
+  });
+
   mcpHttpServer.on("/mcp", HTTP_METHOD_POST, handleMcpPost);
 
   mcpHttpServer.onNotFound([]() {
@@ -1133,6 +1428,7 @@ void setupMcpHttpServer() {
 
   mcpHttpServer.begin();
   mcpHttpEnabled = true;
+  initializeNtpTime();
   Serial.printf("MCP HTTP ready: http://%s:%u/mcp\n", WiFi.localIP().toString().c_str(), MCP_HTTP_PORT);
 }
 
@@ -1253,17 +1549,23 @@ void setup() {
   // USB CDC on Boot must be enabled in the board menu for these logs to appear.
   Serial.begin(115200);
   Serial.setDebugOutput(true);
+  Serial.println("BOOT: setup() entered");
 
   const uint32_t serialWaitStart = millis();
   while (!Serial && (millis() - serialWaitStart) < 3000) {
     delay(10);
   }
 
+  Serial.println("BOOT: serial ready or wait timeout reached");
+  applyConfiguredTimeZone();
+
   delay(500);
 
+  Serial.println("BOOT: initializing I2C bus");
   Wire.begin(I2C_SDA, I2C_SCL);
   delay(50);
 
+  Serial.println("BOOT: initializing C4002");
   if (!c4002Driver.begin(Serial1, C4002_UART_RX, C4002_UART_TX, 115200)) {
     Serial.println("C4002 init failed");
   } else {
@@ -1305,9 +1607,15 @@ void setup() {
       Serial.println("C4002 report-period command failed");
     }
   }
+
+  Serial.println("BOOT: initializing ENS160");
   ens160Driver.begin();
+  Serial.println("BOOT: initializing BME280");
   bme280Driver.begin();
+
+  Serial.println("BOOT: starting MCP HTTP");
   setupMcpHttpServer();
+  Serial.println("BOOT: starting MQTT client");
   setupMqttClient();
 
   Serial.println("Room AI node starting");
@@ -1316,6 +1624,8 @@ void setup() {
 
 // Main execution loop: service HTTP requests, maintain sensor health, refresh readings, and publish state.
 void loop() {
+  pollNtpTime();
+
   // Handle any incoming MCP HTTP requests while the node is running.
   if (mcpHttpEnabled) {
     mcpHttpServer.handleClient();
@@ -1357,7 +1667,7 @@ void loop() {
   const float tempOffsetC = TEMP_OFFSET_F * (5.0f / 9.0f);
 
   snapshot = SensorSnapshot{};
-  snapshot.timestamp_ms = nowMs;
+  snapshot.timestamp_ms = currentTimestampMs();
 
   const bool c4002StateFresh = (lastC4002State.valid && (nowMs - lastC4002UpdateMs) <= 90000UL);
   if (c4002StateFresh) {
@@ -1395,11 +1705,14 @@ void loop() {
 
   contextEngine.update(snapshot);
   const RoomContext room = contextEngine.snapshot();
+  recordOccupancyHistory(snapshot, room);
 
   sampleCount++;
-  Serial.printf("\n--- sample %lu t=%lums ---\n",
+  const String sampleTimeText = buildSampleTimeText(snapshot, ntpTimeAvailable);
+  Serial.printf("\n--- sample %lu t=%s (%s) ---\n",
                 static_cast<unsigned long>(sampleCount),
-                static_cast<unsigned long>(snapshot.timestamp_ms));
+                sampleTimeText.c_str(),
+                ntpTimeAvailable ? "ntp" : "uptime");
 
   Serial.printf("occupied=%d moving=%d stationary=%d vent=%d\n",
                 room.occupied,

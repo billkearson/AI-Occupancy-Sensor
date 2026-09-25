@@ -28,7 +28,15 @@ Test direct context endpoint first:
 Invoke-RestMethod -Method Get -Uri "http://DEVICE_IP:8081/context"
 ```
 
-Expected: JSON containing current room context fields such as occupied, moving, stationary, distance_ft, energy, temperature_f, and pressure_inhg.
+Expected: JSON containing current room context fields such as timestamp, time_source_ntp, occupied, moving, stationary, distance_ft, energy, temperature_f, and pressure_inhg.
+
+Test occupancy history endpoint:
+
+```powershell
+Invoke-RestMethod -Method Get -Uri "http://DEVICE_IP:8081/occupancy/history"
+```
+
+Expected: JSON with depth, count, and entries. History is edge-only and records only occupied state flips.
 
 ## 3. MCP JSON-RPC tests
 
@@ -46,7 +54,15 @@ Expected: result with protocolVersion, serverInfo, and capabilities.
 Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
 
-Expected: includes tools named get_area_data, get_environmental_data, get_occupancy_data, and get_air_quality_data.
+Expected: includes tools named get_area_data, get_environmental_data, get_occupancy_data, get_air_quality_data, and get_occupancy_history.
+
+### Call tool: get_occupancy_history
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_occupancy_history","arguments":{}}}'
+```
+
+Expected: JSON with depth, count, and occupancy transition entries.
 
 ### Call tool: get_area_data
 
@@ -83,15 +99,23 @@ Expected: JSON with eco2_ppm, tvoc_ppb, and sensor_ready.
 ### List resources
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":7,"method":"resources/list","params":{}}'
+Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":8,"method":"resources/list","params":{}}'
 ```
 
-Expected: includes uri room://context/current.
+Expected: includes uri room://context/current and uri room://occupancy/history.
+
+### Read occupancy history resource
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":"room://occupancy/history"}}'
+```
+
+Expected: result.contents with occupancy history JSON text.
 
 ### Read resource
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"room://context/current"}}'
+Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"room://context/current"}}'
 ```
 
 Expected: result.contents with current room context JSON text.
@@ -99,7 +123,7 @@ Expected: result.contents with current room context JSON text.
 ### Ping
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":9,"method":"ping","params":{}}'
+Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":11,"method":"ping","params":{}}'
 ```
 
 Expected: empty result object.
@@ -127,7 +151,7 @@ curl -s -X POST http://DEVICE_IP:8081/mcp -H "Content-Type: application/json" -d
   - Verify JSON-RPC body includes method and id.
 
 - If tools/call returns "Tool not found":
-  - Use one of these names exactly: get_area_data, get_environmental_data, get_occupancy_data, get_air_quality_data.
+  - Use one of these names exactly: get_area_data, get_environmental_data, get_occupancy_data, get_air_quality_data, get_occupancy_history.
 
 ## 6. Security note
 
@@ -141,6 +165,7 @@ The MCP tool names changed to use a get_ prefix.
 - environmental_data -> get_environmental_data
 - occupancy_data -> get_occupancy_data
 - air_quality_data -> get_air_quality_data
+- occupancy_history -> get_occupancy_history
 
 When MCP tool names or descriptions change, keep these files aligned:
 

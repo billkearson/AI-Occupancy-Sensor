@@ -283,6 +283,8 @@ The board uses the FireBeetle 2 ESP32-C6 I²C pins `GPIO19` (SDA) and `GPIO20` (
 
 Network settings are centralized in the shared [config.h](config.h) file. This includes Wi‑Fi, MQTT broker details, and the MCP HTTP port so the project has a single source of truth instead of duplicate values in multiple files.
 
+Time settings are also centralized in [config.h](config.h), including comma-delimited NTP servers (`NTP_SERVERS`) and timezone selection (`TIMEZONE`). If timezone parsing is unavailable, the runtime falls back to UTC.
+
 ## Acknowledgement
 
 Special thanks to DFRobot for providing the hardware used in this project as part of their C4002 Free Trial Program, in Kit 3: Multi-Sensor Fusion Kit (Enabling richer environmental sensing).
@@ -388,7 +390,13 @@ Current Arduino sketch behavior (`AI_Occupancy_Sensor.ino`) differs slightly for
 
 - C4002 UART notifications are polled continuously.
 - Combined telemetry is printed every 5 seconds.
+- Sample `t=` prints timezone-adjusted wall-clock time when NTP is synced, otherwise uptime milliseconds.
 - Console display uses feet (`ft`), Fahrenheit (`F`), and inches of mercury (`inHg`).
+
+Current occupancy history behavior in the sketch:
+
+- Depth is bounded to 10 entries.
+- Entries are edge-only and recorded only when `occupied` flips true/false.
 
 ---
 
@@ -398,7 +406,8 @@ All sensor libraries should feed a normalized internal structure.
 
 ```cpp
 struct RoomObservation {
-    uint64_t timestamp_ms;
+  const char* timestamp;
+  bool time_source_ntp;
 
     // Environment
     float temperature_c;
@@ -975,6 +984,7 @@ The current Arduino implementation exposes these MCP tools:
 * `get_environmental_data`
 * `get_occupancy_data`
 * `get_air_quality_data`
+* `get_occupancy_history`
 
 These tool names are the canonical names used by the sketch, the PowerShell validation script, and the markdown test guide.
 
@@ -984,16 +994,19 @@ The active implementation in AI_Occupancy_Sensor.ino returns structured JSON pay
 
 # 24. Active MCP Resource
 
-The current implementation exposes the following MCP resource URI:
+The current implementation exposes the following MCP resource URIs:
 
 ```text
 room://context/current
+room://occupancy/history
 ```
 
-This resource returns the latest room context in JSON form and is used by the live MCP validation flow.
+`room://context/current` returns the latest room context in JSON form.
+
+`room://occupancy/history` returns bounded edge-only occupancy transition history (depth 10).
 
 ---
-# 30. MCP Streaming
+# 25. MCP Streaming
 
 Streaming should be minimal and event-driven.
 
@@ -1044,7 +1057,7 @@ Stream **meaningful state changes**.
 
 ---
 
-# 31. MCP Session Management
+# 26. MCP Session Management
 
 For the minimum implementation:
 
@@ -1079,7 +1092,7 @@ Important note: the current Arduino implementation does not yet enforce an activ
 
 ---
 
-# 32. HTTP Server Resource Limits
+# 27. HTTP Server Resource Limits
 
 The ESP-IDF HTTP server is designed as a lightweight embedded server and supports URI handlers and configurable server resources. ([Espressif Systems][3])
 
@@ -1100,7 +1113,7 @@ The exact values should be tuned after measuring heap usage on the actual firmwa
 
 ---
 
-# 33. Memory Strategy
+# 28. Memory Strategy
 
 The ESP32-C6 has limited embedded memory, so avoid unnecessary dynamic allocation.
 
@@ -1129,7 +1142,7 @@ The goal is for the MCP server to be just another small HTTP handler, not a larg
 
 ---
 
-# 34. Data Flow
+# 29. Data Flow
 
 ## Sensor → Context
 
@@ -1201,7 +1214,7 @@ AI client
 
 ---
 
-# 35. Example AI Interaction
+# 30. Example AI Interaction
 
 An MCP client asks:
 
@@ -1241,21 +1254,19 @@ It is simply reasoning over the ESP32's local resources.
 
 ---
 
-# 36. Example "Why?" Interaction
+# 31. Example "Why?" Interaction
 
 MCP tool:
 
 ```text
-get_events
+get_occupancy_history
 ```
 
-and:
+can return:
 
 ```text
-get_history
+occupied state transitions
 ```
-
-could return:
 
 ```text
 Presence:
@@ -1292,7 +1303,7 @@ The important point is that the **evidence originates on the ESP32**.
 
 ---
 
-# 37. MQTT and MCP Are Independent
+# 32. MQTT and MCP Are Independent
 
 The system should continue operating if either integration disappears.
 
@@ -1328,7 +1339,7 @@ This makes the room node autonomous.
 
 ---
 
-# 38. Local-First Failure Model
+# 33. Local-First Failure Model
 
 ```text
                     ESP32-C6
@@ -1350,7 +1361,7 @@ No cloud dependency exists in the core architecture.
 
 ---
 
-# 39. Security
+# 34. Security
 
 Do not expose the ESP32 MCP endpoint directly to the public Internet.
 
@@ -1392,7 +1403,7 @@ For a higher-security installation, use HTTPS/TLS as supported by ESP-IDF and pr
 
 ---
 
-# 40. OTA
+# 35. OTA
 
 Firmware should eventually support OTA.
 
@@ -1412,7 +1423,7 @@ Do not make the MCP protocol implementation independently updatable.
 
 ---
 
-# 41. Configuration
+# 36. Configuration
 
 Store configuration in NVS.
 
@@ -1465,7 +1476,7 @@ Never return Wi-Fi or MQTT passwords.
 
 ---
 
-# 42. Implementation Notes
+# 37. Implementation Notes
 
 The current codebase is intentionally organized as a single Arduino sketch rather than a separate ESP-IDF application tree. The design still preserves clear boundaries for sensor drivers, state inference, and integration logic, but these are implemented directly in the sketch instead of being split into an external ESP-IDF component layout.
 
@@ -1473,7 +1484,7 @@ The DFRobot sensor libraries can still be wrapped behind the project's own senso
 
 ---
 
-# 43. Recommended Interfaces
+# 38. Recommended Interfaces
 
 Keep the application independent of specific sensor libraries.
 
@@ -1517,7 +1528,7 @@ This prevents the rest of the application from becoming coupled to vendor APIs.
 
 ---
 
-# 44. Context Engine API
+# 39. Context Engine API
 
 The context engine can have a simple interface:
 
@@ -1538,7 +1549,7 @@ The MQTT and MCP layers both consume the resulting `RoomState`.
 
 ---
 
-# 45. MCP Server API
+# 40. MCP Server API
 
 The embedded MCP implementation can remain similarly small:
 
@@ -1588,7 +1599,7 @@ MCP should consume **room information**, not raw hardware interfaces.
 
 ---
 
-# 46. Minimum MCP Request Routing
+# 41. Minimum MCP Request Routing
 
 The implementation can use a simple dispatcher:
 
@@ -1615,7 +1626,7 @@ This keeps the embedded implementation small.
 
 ---
 
-# 47. Active MCP Tool Routing
+# 42. Active MCP Tool Routing
 
 ```text
 tools/call
@@ -1632,30 +1643,38 @@ tools/call
      │        ↓
      │    presence / motion / static / distance / energy
      │
-     └── get_air_quality_data
-              ↓
-          eCO₂ / TVOC
+     ├── get_air_quality_data
+     │        ↓
+     │    eCO₂ / TVOC
+     │
+     └── get_occupancy_history
+          ↓
+        edge-only occupancy transition history (depth 10)
 ```
 
 This matches the tool names currently implemented in AI_Occupancy_Sensor.ino.
 
 ---
 
-# 48. Active Resource Routing
+# 43. Active Resource Routing
 
 ```text
 resources/read
        │
-       └── room://context/current
-               ↓
-          current room context JSON
+    ├── room://context/current
+    │        ↓
+    │   current room context JSON
+    │
+    └── room://occupancy/history
+       ↓
+     edge-only occupancy transition history JSON
 ```
 
 This is the live MCP resource implemented by the current sketch.
 
 ---
 
-# 49. What the ESP32 Should NOT Do
+# 44. What the ESP32 Should NOT Do
 
 The ESP32 should not attempt to:
 
@@ -1672,7 +1691,7 @@ The ESP32 should remain a **bounded, deterministic room intelligence appliance**
 
 ---
 
-# 50. What the AI Should Do
+# 45. What the AI Should Do
 
 The AI/client should handle:
 
@@ -1697,7 +1716,7 @@ eCO₂ has steadily increased. Ventilation may be beneficial."
 
 ---
 
-# 51. Multiple Rooms
+# 46. Multiple Rooms
 
 The architecture scales naturally.
 
@@ -1728,7 +1747,7 @@ The important point is that **the room node itself remains complete**.
 
 ---
 
-# 52. Example Final Deployment
+# 47. Example Final Deployment
 
 ```text
                        HOME LAN
@@ -1767,6 +1786,10 @@ AI Client
 ```
 
 ---
+
+# 48. Near-Term Priorities
+
+```text
 sensor_error
 ```
 
@@ -1774,7 +1797,7 @@ Everything else can wait.
 
 ---
 
-# 54. Final Architecture
+# 49. Final Architecture
 
 The resulting device is essentially a self-contained **AI-readable room sensor**:
 
@@ -1782,9 +1805,9 @@ The resulting device is essentially a self-contained **AI-readable room sensor**
 ┌──────────────────────────────────────────────────────┐
 │                    ESP32-C6 ROOM AI                  │
 │                                                      │
-│  ┌────────┐  ┌────────┐  ┌────────┐                 │
-│  │ C4002  │  │ ENS160 │  │ BME280 │                 │
-│  └───┬────┘  └───┬────┘  └───┬────┘                 │
+│  ┌────────┐   ┌────────┐   ┌────────┐                │
+│  │ C4002  │   │ ENS160 │   │ BME280 │                │
+│  └───┬────┘   └───┬────┘   └───┬────┘                │
 │      │            │            │                     │
 │      └────────────┼────────────┘                     │
 │                   ▼                                  │

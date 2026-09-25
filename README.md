@@ -37,6 +37,8 @@ The project uses a single shared configuration header for local network and runt
 This file is the source of truth for:
 
 - Wi‑Fi SSID and password
+- NTP server list (`NTP_SERVERS`)
+- Timezone selection (`TIMEZONE`)
 - MQTT broker host, port, username, and password
 - MQTT state and availability topic names
 - MCP HTTP port (`MCP_HTTP_PORT`)
@@ -49,6 +51,8 @@ Create a local copy of [config.h.example](config.h.example) named `config.h` and
 
 - `WIFI_SSID`
 - `WIFI_PASSWORD`
+- `NTP_SERVERS`
+- `TIMEZONE`
 - `MCP_HTTP_PORT`
 - `MQTT_BROKER_HOST`
 - `MQTT_BROKER_PORT`
@@ -155,7 +159,7 @@ The power tap is a practical hardware workaround to keep the C4002 stable while 
 2. Copy [config.h.example](config.h.example) to `config.h` and fill in your Wi‑Fi, MQTT, and MCP values.
 3. Connect the ESP32-C6 via USB and compile/upload [AI_Occupancy_Sensor.ino](AI_Occupancy_Sensor.ino).
 4. Open the serial monitor at 115200 baud to confirm startup logs and sensor readiness.
-5. Test the local HTTP endpoint at `http://DEVICE_IP:8081/context` and the MCP endpoint at `http://DEVICE_IP:8081/mcp`.
+5. Test the local HTTP endpoints at `http://DEVICE_IP:8081/context` and `http://DEVICE_IP:8081/occupancy/history`, and the MCP endpoint at `http://DEVICE_IP:8081/mcp`.
 6. Validate the MCP flow using [MCP-Test.ps1](MCP-Test.ps1) or the examples in [MCP-Testing.md](MCP-Testing.md).
 
 ## Troubleshooting
@@ -223,7 +227,7 @@ Current runtime behavior in the sketch:
 Current sample format:
 
 ```text
---- sample 12 t=60234ms ---
+--- sample 12 t=2026-09-24T19:51:32-0400 (ntp) ---
 occupied=1 moving=0 stationary=1 vent=0
 C4002 present=1 motion=0 static=1 dist=5.22ft energy=99
 ENS160 ready=1 eco2=552 tvoc=101
@@ -233,6 +237,7 @@ BME280 ready=1 temp=82.67F humidity=41.10% pressure=30.04inHg
 Field notes:
 
 - `occupied`, `moving`, `stationary`, and `vent` are derived context-engine outputs.
+- `t=` shows timezone-adjusted wall-clock time when NTP is available, otherwise uptime milliseconds.
 - C4002 distance is displayed in feet (`ft`).
 - BME280 temperature is displayed in Fahrenheit (`F`).
 - BME280 pressure is displayed in inches of mercury (`inHg`).
@@ -253,6 +258,23 @@ Current MCP tool names advertised by tools/list in AI_Occupancy_Sensor.ino:
 - get_environmental_data: Returns temperature, humidity, and pressure metrics.
 - get_occupancy_data: Returns presence, motion, static presence, distance, and energy.
 - get_air_quality_data: Returns eCO2 and TVOC metrics.
+- get_occupancy_history: Returns bounded occupancy transition history (depth 10).
+
+Current MCP resources advertised by resources/list in AI_Occupancy_Sensor.ino:
+
+- room://context/current: Current room context JSON.
+- room://occupancy/history: Occupancy history JSON.
+
+Timestamp contract:
+
+- Payloads now expose `timestamp` (string) instead of `timestamp_ms`.
+- When NTP is synced, `timestamp` is timezone-adjusted according to `TIMEZONE` in [config.h](config.h).
+- When NTP is not synced, `timestamp` falls back to uptime text (for example, `12345ms`).
+
+Occupancy history behavior:
+
+- History is edge-only: entries are recorded only when `occupied` flips true/false.
+- Maximum retained depth is 10 entries.
 
 Tool name change note:
 

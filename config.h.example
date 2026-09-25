@@ -9,6 +9,21 @@
 static const char WIFI_SSID[] = "<YOUR_WIFI_SSID>";
 static const char WIFI_PASSWORD[] = "<YOUR_WIFI_PASSWORD>";
 
+// NTP server settings for time synchronization.
+static const char NTP_SERVERS[] = "pool.ntp.org,time.nist.gov";
+
+// Time zone for all NTP-based date/time strings.
+// Use POSIX TZ format. Common examples:
+// - UTC: UTC0
+// - US Eastern: EST5EDT,M3.2.0/2,M11.1.0/2
+// - US Central: CST6CDT,M3.2.0/2,M11.1.0/2
+// - US Mountain: MST7MDT,M3.2.0/2,M11.1.0/2
+// - US Pacific: PST8PDT,M3.2.0/2,M11.1.0/2
+// - UK: GMT0BST,M3.5.0/1,M10.5.0/2
+// - Central Europe: CET-1CEST,M3.5.0/2,M10.5.0/3
+// If this is empty or invalid, UTC is used.
+static const char TIMEZONE[] = "UTC0";
+
 // MCP HTTP endpoint for exposing room data to the host system.
 constexpr uint16_t MCP_HTTP_PORT = <MCP_HTTP_PORT>;
 

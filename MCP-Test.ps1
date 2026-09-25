@@ -50,21 +50,25 @@ function Invoke-McpRequest {
 $baseUrl = "http://$DeviceIp`:$Port"
 $mcpUrl = "$baseUrl/mcp"
 $contextUrl = "$baseUrl/context"
+$occupancyHistoryUrl = "$baseUrl/occupancy/history"
 
 Write-Host "Testing MCP endpoints at $baseUrl" -ForegroundColor Cyan
 Write-Host ""
 
 $tests = @(
     @{ Name = 'GET /context'; Method = 'GET'; Uri = $contextUrl; Body = '' },
+    @{ Name = 'GET /occupancy/history'; Method = 'GET'; Uri = $occupancyHistoryUrl; Body = '' },
     @{ Name = 'initialize'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' },
     @{ Name = 'tools/list'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' },
     @{ Name = 'tools/call get_area_data'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_area_data","arguments":{}}}' },
     @{ Name = 'tools/call get_environmental_data'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_environmental_data","arguments":{}}}' },
     @{ Name = 'tools/call get_occupancy_data'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_occupancy_data","arguments":{}}}' },
     @{ Name = 'tools/call get_air_quality_data'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_air_quality_data","arguments":{}}}' },
-    @{ Name = 'resources/list'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":7,"method":"resources/list","params":{}}' },
-    @{ Name = 'resources/read room://context/current'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"room://context/current"}}' },
-    @{ Name = 'ping'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":9,"method":"ping","params":{}}' }
+    @{ Name = 'tools/call get_occupancy_history'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_occupancy_history","arguments":{}}}' },
+    @{ Name = 'resources/list'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":8,"method":"resources/list","params":{}}' },
+    @{ Name = 'resources/read room://context/current'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"room://context/current"}}' },
+    @{ Name = 'resources/read room://occupancy/history'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":"room://occupancy/history"}}' },
+    @{ Name = 'ping'; Method = 'POST'; Uri = $mcpUrl; Body = '{"jsonrpc":"2.0","id":11,"method":"ping","params":{}}' }
 )
 
 $results = foreach ($t in $tests) {

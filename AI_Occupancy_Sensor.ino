@@ -5,7 +5,7 @@
   Includes WiFi connectivity, web server, MCP, and MQTT reporting.
 
   Project: AI Occupancy Sensor
-  Author: Bill
+  Author: Bill Kearson
   Date: 2026-09-21
 */
 
@@ -34,6 +34,7 @@ struct C4002State {
   uint8_t target_state = 0;
   uint16_t distance_cm = 0;
   uint8_t energy = 0;
+  float light_lux = 0.0f;
   bool motion = false;
   bool presence = false;
   uint16_t signal_strength = 0;
@@ -42,10 +43,12 @@ struct C4002State {
 // Normalized, room-level view of the current sensor readings.
 struct SensorSnapshot {
   bool c4002_present = false;
+  bool occupied = false;
   bool motion_detected = false;
   bool static_presence = false;
   float distance_m = 0.0f;
   int energy_level = 0;
+  float light_lux = 0.0f;
   bool ens160_ready = false;
   float eco2_ppm = 0.0f;
   float tvoc_ppb = 0.0f;
@@ -77,9 +80,18 @@ struct OccupancyHistoryEntry {
   bool stationary = false;
   float distance_ft = 0.0f;
   int energy = 0;
+  float light_lux = 0.0f;
+  float temperature_f = 0.0f;
+  float humidity_rh = 0.0f;
+  float eco2_ppm = 0.0f;
+  float tvoc_ppb = 0.0f;
 };
 
-constexpr size_t OCCUPANCY_HISTORY_DEPTH = 10;
+constexpr size_t MIN_OCCUPANCY_HISTORY_DEPTH = 10;
+constexpr size_t MAX_OCCUPANCY_HISTORY_DEPTH = 100;
+static_assert(
+  OCCUPANCY_HISTORY_DEPTH >= MIN_OCCUPANCY_HISTORY_DEPTH && OCCUPANCY_HISTORY_DEPTH <= MAX_OCCUPANCY_HISTORY_DEPTH,
+  "OCCUPANCY_HISTORY_DEPTH must be between 10 and 100");
 
 // Driver for the DFRobot C4002 mmWave sensor.
 // It wraps the UART packet framing, command payloads, and notification parsing
@@ -106,6 +118,26 @@ public:
   static constexpr uint8_t NO_TARGET = 0;
   static constexpr uint8_t PRESENCE = 1;
   static constexpr uint8_t MOTION = 2;
+
+  static bool isRecognizedTargetState(uint8_t targetState) {
+    return targetState == NO_TARGET || targetState == PRESENCE || targetState == MOTION;
+  }
+
+  static bool hasValidOccupancyReading(const C4002State &state) {
+    if (!state.valid || !isRecognizedTargetState(state.target_state)) {
+      return false;
+    }
+
+    if (state.target_state != PRESENCE && state.target_state != MOTION) {
+      return false;
+    }
+
+    if (state.distance_cm == 0 || state.distance_cm > 1100) {
+      return false;
+    }
+
+    return state.energy > 0;
+  }
 
   enum LedMode : uint8_t {
     LED_OFF = 0x00,
@@ -477,8 +509,17 @@ private:
     state.valid = true;
     state.note_type = noteCmd;
     state.target_state = data[0];
+    state.light_lux = float(uint16_t(data[1] | (data[2] << 8))) * 0.1f;
     state.distance_cm = uint16_t(data[9] | (data[10] << 8));
     state.energy = data[16];
+
+    if (!isRecognizedTargetState(state.target_state)) {
+      state.motion = false;
+      state.presence = false;
+      diagnostics_.result_notes_parsed++;
+      return true;
+    }
+
     state.motion = (state.target_state == MOTION);
     state.presence = (state.target_state == PRESENCE || state.target_state == MOTION);
     diagnostics_.result_notes_parsed++;
@@ -766,7 +807,7 @@ class ContextEngine {
 public:
   // Convert the full sensor snapshot into a room-level occupancy and air-quality context.
   void update(const SensorSnapshot &snapshot) {
-    current_.occupied = snapshot.c4002_present;
+    current_.occupied = snapshot.occupied;
     current_.moving = snapshot.motion_detected;
     current_.stationary = snapshot.static_presence;
     current_.temperature_c = snapshot.temperature_c;
@@ -815,6 +856,31 @@ size_t occupancyHistoryCount = 0;
 size_t occupancyHistoryNext = 0;
 bool occupancyEdgeStateInitialized = false;
 bool lastRecordedOccupiedState = false;
+bool occupancyDebounceInitialized = false;
+bool debouncedOccupiedState = false;
+uint8_t occupancyStateChangeVotes = 0;
+
+bool applyOccupancyDebounce(bool rawOccupied) {
+  if (!occupancyDebounceInitialized) {
+    debouncedOccupiedState = rawOccupied;
+    occupancyDebounceInitialized = true;
+    occupancyStateChangeVotes = 0;
+    return debouncedOccupiedState;
+  }
+
+  if (rawOccupied == debouncedOccupiedState) {
+    occupancyStateChangeVotes = 0;
+    return debouncedOccupiedState;
+  }
+
+  occupancyStateChangeVotes++;
+  if (occupancyStateChangeVotes >= 2) {
+    debouncedOccupiedState = rawOccupied;
+    occupancyStateChangeVotes = 0;
+  }
+
+  return debouncedOccupiedState;
+}
 
 // Apply configured timezone; fall back to UTC if missing or invalid.
 void applyConfiguredTimeZone() {
@@ -1124,11 +1190,11 @@ String buildContextJson() {
   const float pressureInHg = snapshot.pressure_hpa * 0.0295299830714f;
   const String timestampText = buildSampleTimeText(snapshot, ntpTimeAvailable);
 
-  char buf[640] = {0};
+  char buf[680] = {0};
   std::snprintf(
       buf,
       sizeof(buf),
-      "{\"timestamp\":\"%s\",\"time_source_ntp\":%s,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"ventilation_recommended\":%s,\"air_quality_warning\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"eco2_ppm\":%.0f,\"tvoc_ppb\":%.0f,\"temperature_f\":%.2f,\"humidity_rh\":%.2f,\"pressure_inhg\":%.2f}",
+      "{\"timestamp\":\"%s\",\"time_source_ntp\":%s,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"ventilation_recommended\":%s,\"air_quality_warning\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"light_lux\":%.1f,\"eco2_ppm\":%.0f,\"tvoc_ppb\":%.0f,\"temperature_f\":%.2f,\"humidity_rh\":%.2f,\"pressure_inhg\":%.2f}",
       timestampText.c_str(),
       ntpTimeAvailable ? "true" : "false",
       room.occupied ? "true" : "false",
@@ -1138,6 +1204,7 @@ String buildContextJson() {
       room.air_quality_warning ? "true" : "false",
       distanceFt,
       snapshot.energy_level,
+      snapshot.light_lux,
       snapshot.eco2_ppm,
       snapshot.tvoc_ppb,
       temperatureF,
@@ -1168,17 +1235,27 @@ void recordOccupancyHistory(const SensorSnapshot &sensor, const RoomContext &roo
   slot.stationary = room.stationary;
   slot.distance_ft = sensor.distance_m * 3.28084f;
   slot.energy = sensor.energy_level;
+  slot.light_lux = sensor.light_lux;
+  slot.temperature_f = (sensor.temperature_c * 9.0f / 5.0f) + 32.0f;
+  slot.humidity_rh = sensor.humidity_rh;
+  slot.eco2_ppm = sensor.eco2_ppm;
+  slot.tvoc_ppb = sensor.tvoc_ppb;
 
   occupancyHistoryNext = (occupancyHistoryNext + 1) % OCCUPANCY_HISTORY_DEPTH;
   if (occupancyHistoryCount < OCCUPANCY_HISTORY_DEPTH) {
     occupancyHistoryCount++;
   }
+
+  Serial.printf("Occupancy history event recorded: occupied=%d count=%u depth=%u\n",
+                slot.occupied ? 1 : 0,
+                static_cast<unsigned>(occupancyHistoryCount),
+                static_cast<unsigned>(OCCUPANCY_HISTORY_DEPTH));
 }
 
 // Build the occupancy history JSON from oldest to newest for API and MCP consumers.
 String buildOccupancyHistoryJson() {
   String out;
-  out.reserve(2200);
+  out.reserve(200 + (occupancyHistoryCount * 280));
   out = String("{\"depth\":") + String(static_cast<unsigned>(OCCUPANCY_HISTORY_DEPTH)) +
         String(",\"count\":") + String(static_cast<unsigned>(occupancyHistoryCount)) +
         String(",\"entries\":[");
@@ -1191,18 +1268,23 @@ String buildOccupancyHistoryJson() {
     entrySnapshot.timestamp_ms = entry.timestamp_ms;
     const String entryTimestampText = buildSampleTimeText(entrySnapshot, entry.time_source_ntp);
 
-    char entryBuf[220] = {0};
+    char entryBuf[360] = {0};
     std::snprintf(
       entryBuf,
       sizeof(entryBuf),
-      "{\"timestamp\":\"%s\",\"time_source_ntp\":%s,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"distance_ft\":%.2f,\"energy\":%d}",
+      "{\"timestamp\":\"%s\",\"time_source_ntp\":%s,\"occupied\":%s,\"moving\":%s,\"stationary\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"light_lux\":%.1f,\"temperature_f\":%.2f,\"humidity_rh\":%.2f,\"eco2_ppm\":%.2f,\"tvoc_ppb\":%.2f}",
       entryTimestampText.c_str(),
       entry.time_source_ntp ? "true" : "false",
       entry.occupied ? "true" : "false",
       entry.moving ? "true" : "false",
       entry.stationary ? "true" : "false",
       entry.distance_ft,
-      entry.energy);
+      entry.energy,
+      entry.light_lux,
+      entry.temperature_f,
+      entry.humidity_rh,
+      entry.eco2_ppm,
+      entry.tvoc_ppb);
 
     if (i > 0) {
       out += ',';
@@ -1262,13 +1344,17 @@ void handleMcpPost() {
   }
 
   if (method == "tools/list") {
+    const String occupancyHistoryToolDescription =
+      String("Returns edge-only occupancy transition history (depth ") +
+      String(static_cast<unsigned>(OCCUPANCY_HISTORY_DEPTH)) +
+      String(", oldest to newest), including occupancy, distance, energy, ambient light (lux), temperature, humidity, eCO2, and TVOC");
     String resp = String("{\"jsonrpc\":\"2.0\",\"id\":") + idToken +
                   ",\"result\":{\"tools\":["
-                  "{\"name\":\"get_area_data\",\"description\":\"Returns the current real-time environmental metrics (temperature, humidity, pressure, CO2, and TVOC levels) and human occupancy metrics (present, motion, static, distance, energy) for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+                  "{\"name\":\"get_area_data\",\"description\":\"Returns the current real-time environmental metrics (temperature, humidity, pressure, eCO2, and TVOC levels) and human occupancy metrics (present, motion, static, distance, energy, ambient light in lux) for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
                   "{\"name\":\"get_environmental_data\",\"description\":\"Returns temperature, humidity, and pressure metrics for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
-                  "{\"name\":\"get_occupancy_data\",\"description\":\"Returns human occupancy metrics (present, motion, static, distance, energy) for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
-                  "{\"name\":\"get_air_quality_data\",\"description\":\"Returns CO2 and TVOC levels for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
-                  "{\"name\":\"get_occupancy_history\",\"description\":\"Returns the most recent occupancy history entries (depth 10, oldest to newest)\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}}"
+                  "{\"name\":\"get_occupancy_data\",\"description\":\"Returns human occupancy metrics (present, motion, static, distance, energy, and ambient light in lux) for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+                  "{\"name\":\"get_air_quality_data\",\"description\":\"Returns eCO2 and TVOC levels for the area\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}},"
+                  "{\"name\":\"get_occupancy_history\",\"description\":\"" + jsonEscape(occupancyHistoryToolDescription) + "\",\"inputSchema\":{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}}"
                   "]}}";
     mcpHttpServer.send(200, "application/json", resp);
     return;
@@ -1283,6 +1369,11 @@ void handleMcpPost() {
 
   if (method == "resources/read") {
     const String resourceUri = extractJsonStringField(body, "uri");
+    if (resourceUri != "room://context/current" && resourceUri != "room://occupancy/history") {
+      sendMcpError(idToken, -32602, "Invalid params: unsupported resource uri");
+      return;
+    }
+
     const bool readHistory = (resourceUri == "room://occupancy/history");
     const String payloadJson = readHistory ? buildOccupancyHistoryJson() : buildContextJson();
     const String responseUri = readHistory ? String("room://occupancy/history") : String("room://context/current");
@@ -1323,15 +1414,16 @@ void handleMcpPost() {
 
     if (toolName == "get_occupancy_data") {
       const float distanceFt = snapshot.distance_m * 3.28084f;
-      char valueBuf[160] = {0};
+      char valueBuf[192] = {0};
       std::snprintf(valueBuf,
                     sizeof(valueBuf),
-                    "{\"presence\":%s,\"motion\":%s,\"static\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"sensor_ready\":%s}",
+                    "{\"presence\":%s,\"motion\":%s,\"static\":%s,\"distance_ft\":%.2f,\"energy\":%d,\"light_lux\":%.1f,\"sensor_ready\":%s}",
                     snapshot.c4002_present ? "true" : "false",
                     snapshot.motion_detected ? "true" : "false",
                     snapshot.static_presence ? "true" : "false",
                     distanceFt,
                     snapshot.energy_level,
+                    snapshot.light_lux,
                     lastC4002State.valid ? "true" : "false");
       const String textPayload = jsonEscape(String(valueBuf));
 
@@ -1519,12 +1611,13 @@ void printSensorSnapshot(const SensorSnapshot &s) {
   const float temperatureF = (s.temperature_c * 9.0f / 5.0f) + 32.0f;
   const float pressureInHg = s.pressure_hpa * 0.0295299830714f;
 
-  Serial.printf("C4002 present=%d motion=%d static=%d dist=%.2fft energy=%d\n",
+  Serial.printf("C4002 present=%d motion=%d static=%d dist=%.2fft energy=%d light=%.1flux\n",
                 s.c4002_present,
                 s.motion_detected,
                 s.static_presence,
                 distanceFt,
-                s.energy_level);
+                s.energy_level,
+                s.light_lux);
 
   Serial.printf("ENS160 ready=%d eco2=%.0f tvoc=%.0f\n",
                 s.ens160_ready,
@@ -1671,11 +1764,15 @@ void loop() {
 
   const bool c4002StateFresh = (lastC4002State.valid && (nowMs - lastC4002UpdateMs) <= 90000UL);
   if (c4002StateFresh) {
-    snapshot.c4002_present = lastC4002State.presence;
-    snapshot.motion_detected = lastC4002State.motion;
-    snapshot.static_presence = lastC4002State.presence && !lastC4002State.motion;
+    const bool rawPresent = lastC4002State.presence && C4002Driver::hasValidOccupancyReading(lastC4002State);
+    const bool debouncedOccupied = applyOccupancyDebounce(rawPresent);
+    snapshot.c4002_present = rawPresent;
+    snapshot.occupied = debouncedOccupied;
+    snapshot.motion_detected = rawPresent && lastC4002State.motion;
+    snapshot.static_presence = rawPresent && lastC4002State.presence && !lastC4002State.motion;
     snapshot.distance_m = float(lastC4002State.distance_cm) / 100.0f;
     snapshot.energy_level = int(lastC4002State.energy);
+    snapshot.light_lux = lastC4002State.light_lux;
   } else if (lastC4002State.valid) {
     Serial.printf("C4002 stale for %lu ms; reinitializing\n",
                   static_cast<unsigned long>(nowMs - lastC4002UpdateMs));

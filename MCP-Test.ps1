@@ -83,10 +83,7 @@ foreach ($r in $results) {
         Write-Host "PASS  $($r.Name)" -ForegroundColor Green
 
         try {
-            $json = $r.Result | ConvertTo-Json -Depth 10 -Compress
-            if ($json.Length -gt 800) {
-                $json = $json.Substring(0, 800) + '...'
-            }
+            $json = $r.Result | ConvertTo-Json -Depth 20 -Compress
             Write-Host "  Response: $json"
         }
         catch {

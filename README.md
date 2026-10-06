@@ -60,6 +60,7 @@ Create a local copy of [config.h.example](config.h.example) named `config.h` and
 - `MQTT_PASSWORD`
 - `MQTT_TOPIC_STATE`
 - `MQTT_TOPIC_AVAILABILITY`
+- `OCCUPANCY_HISTORY_DEPTH`
 - `TEMP_OFFSET_F`
 - `HUMIDITY_OFFSET_RH`
 
@@ -258,7 +259,7 @@ Current MCP tool names advertised by tools/list in AI_Occupancy_Sensor.ino:
 - get_environmental_data: Returns temperature, humidity, and pressure metrics.
 - get_occupancy_data: Returns presence, motion, static presence, distance, and energy.
 - get_air_quality_data: Returns eCO2 and TVOC metrics.
-- get_occupancy_history: Returns bounded occupancy transition history (depth 10).
+- get_occupancy_history: Returns bounded occupancy transition history (configured depth).
 
 Current MCP resources advertised by resources/list in AI_Occupancy_Sensor.ino:
 
@@ -274,7 +275,9 @@ Timestamp contract:
 Occupancy history behavior:
 
 - History is edge-only: entries are recorded only when `occupied` flips true/false.
-- Maximum retained depth is 10 entries.
+- Maximum retained depth is configured by `OCCUPANCY_HISTORY_DEPTH` in [config.h](config.h).
+- `OCCUPANCY_HISTORY_DEPTH` must be between 10 and 100 (inclusive).
+- Each history entry also includes event-time `temperature_f`, `humidity_rh`, `eco2_ppm`, and `tvoc_ppb`.
 
 Tool name change note:
 

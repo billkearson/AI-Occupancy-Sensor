@@ -37,6 +37,10 @@ static const char MQTT_PASSWORD[] = "<MQTT_PASSWORD>";
 static const char MQTT_TOPIC_STATE[] = "<MQTT_TOPIC_STATE>";
 static const char MQTT_TOPIC_AVAILABILITY[] = "<MQTT_TOPIC_AVAILABILITY>";
 
+// Occupancy transition history depth for HTTP/MCP responses.
+// Must remain between 10 and 100 entries (validated in code).
+constexpr uint16_t OCCUPANCY_HISTORY_DEPTH = 10;
+
 // Environmental sensor correction offsets.
 // Positive values increase reported readings; negative values reduce them.
 constexpr float TEMP_OFFSET_F = 0.0f;

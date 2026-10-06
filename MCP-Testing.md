@@ -37,6 +37,45 @@ Invoke-RestMethod -Method Get -Uri "http://DEVICE_IP:8081/occupancy/history"
 ```
 
 Expected: JSON with depth, count, and entries. History is edge-only and records only occupied state flips.
+Each entry includes timestamp/state fields plus `temperature_f`, `humidity_rh`, `eco2_ppm`, and `tvoc_ppb`.
+The returned `depth` should match `OCCUPANCY_HISTORY_DEPTH` configured in [config.h](config.h) (valid range: 10-100).
+
+Example response shape:
+
+```json
+{
+  "depth": 10,
+  "count": 2,
+  "entries": [
+    {
+      "timestamp": "2026-10-05T17:45:12-0400",
+      "time_source_ntp": true,
+      "occupied": true,
+      "moving": true,
+      "stationary": false,
+      "distance_ft": 4.27,
+      "energy": 138,
+      "temperature_f": 73.48,
+      "humidity_rh": 44.10,
+      "eco2_ppm": 612.00,
+      "tvoc_ppb": 35.00
+    },
+    {
+      "timestamp": "2026-10-05T17:46:03-0400",
+      "time_source_ntp": true,
+      "occupied": false,
+      "moving": false,
+      "stationary": false,
+      "distance_ft": 0.00,
+      "energy": 0,
+      "temperature_f": 73.42,
+      "humidity_rh": 44.25,
+      "eco2_ppm": 604.00,
+      "tvoc_ppb": 33.00
+    }
+  ]
+}
+```
 
 ## 3. MCP JSON-RPC tests
 
@@ -62,7 +101,16 @@ Expected: includes tools named get_area_data, get_environmental_data, get_occupa
 Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_occupancy_history","arguments":{}}}'
 ```
 
-Expected: JSON with depth, count, and occupancy transition entries.
+Expected: JSON with depth, count, and occupancy transition entries including `temperature_f`, `humidity_rh`, `eco2_ppm`, and `tvoc_ppb`.
+The returned `depth` should match `OCCUPANCY_HISTORY_DEPTH` configured in [config.h](config.h).
+
+### Resource read invalid URI check
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://DEVICE_IP:8081/mcp" -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"room://unknown"}}'
+```
+
+Expected: JSON-RPC error with code `-32602` and message like `Invalid params: unsupported resource uri`.
 
 ### Call tool: get_area_data
 

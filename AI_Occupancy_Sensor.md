@@ -118,6 +118,7 @@ The C4002 provides the occupancy-related information:
 * distance
 * target information
 * target energy/intensity
+* ambient light intensity in lux
 * direction where supported by the configured C4002 operating mode
 
 The C4002 communicates with the ESP32 over UART.
@@ -395,7 +396,7 @@ Current Arduino sketch behavior (`AI_Occupancy_Sensor.ino`) differs slightly for
 
 Current occupancy history behavior in the sketch:
 
-- Depth is bounded to 10 entries.
+- Depth is configured by `OCCUPANCY_HISTORY_DEPTH` in [config.h](config.h), bounded to 10-100 entries.
 - Entries are edge-only and recorded only when `occupied` flips true/false.
 
 ---
@@ -1003,7 +1004,7 @@ room://occupancy/history
 
 `room://context/current` returns the latest room context in JSON form.
 
-`room://occupancy/history` returns bounded edge-only occupancy transition history (depth 10).
+`room://occupancy/history` returns bounded edge-only occupancy transition history using the configured `OCCUPANCY_HISTORY_DEPTH` value, including event-time occupancy, distance/energy, and environmental (`temperature_f`, `humidity_rh`, `eco2_ppm`, `tvoc_ppb`) fields.
 
 ---
 # 25. MCP Streaming
@@ -1649,7 +1650,7 @@ tools/call
      │
      └── get_occupancy_history
           ↓
-        edge-only occupancy transition history (depth 10)
+        edge-only occupancy transition history (configured depth)
 ```
 
 This matches the tool names currently implemented in AI_Occupancy_Sensor.ino.

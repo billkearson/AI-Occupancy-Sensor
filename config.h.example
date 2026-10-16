@@ -41,6 +41,24 @@ static const char MQTT_TOPIC_AVAILABILITY[] = "<MQTT_TOPIC_AVAILABILITY>";
 // Must remain between 10 and 100 entries (validated in code).
 constexpr uint16_t OCCUPANCY_HISTORY_DEPTH = 10;
 
+// C4002 output pin mode: 1, 2, or 3.
+// 1 = output HIGH only when motion is detected.
+// 2 = output HIGH only when static presence is detected.
+// 3 = output HIGH when either motion or presence is detected.
+// Choose 3 for a room-occupied indicator that follows the occupancy system.
+constexpr uint8_t C4002_OUT_PIN_MODE = 3;
+
+// C4002 target detection range in centimeters.
+// Valid range is 0-1100 cm, and the nearest value must be less than or equal to
+// the farthest value. Use narrower values when the room is small or you want to
+// ignore targets beyond adjacent walls or hallways. 1 foot = 30.48 cm.
+constexpr uint16_t C4002_DETECT_RANGE_NEAR_CM = 0;
+constexpr uint16_t C4002_DETECT_RANGE_FAR_CM = 1100;
+
+// Set to true to run the built-in C4002 environment calibration during boot.
+// Set to false to skip calibration and use the sensor's default factory setup.
+constexpr bool C4002_RUN_ENVIRONMENT_CALIBRATION = false;
+
 // Environmental sensor correction offsets.
 // Positive values increase reported readings; negative values reduce them.
 constexpr float TEMP_OFFSET_F = 0.0f;

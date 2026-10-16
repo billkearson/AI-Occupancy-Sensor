@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <http_parser.h>
 #include <WebServer.h>
 #include <PubSubClient.h>
 #include <stdlib.h>
@@ -24,15 +25,16 @@ constexpr uint8_t C4002_UART_TX = 16;
 constexpr uint8_t I2C_SDA = 19;
 constexpr uint8_t I2C_SCL = 20;
 
-constexpr HTTPMethod HTTP_METHOD_GET = static_cast<HTTPMethod>(1);
-constexpr HTTPMethod HTTP_METHOD_POST = static_cast<HTTPMethod>(3);
-
 // Latest parsed values from the C4002 mmWave occupancy sensor.
 struct C4002State {
   bool valid = false;
   uint8_t note_type = 0;
   uint8_t target_state = 0;
+  uint16_t presence_distance_cm = 0;
+  uint16_t motion_distance_cm = 0;
   uint16_t distance_cm = 0;
+  uint8_t presence_energy = 0;
+  uint8_t motion_energy = 0;
   uint8_t energy = 0;
   float light_lux = 0.0f;
   bool motion = false;
@@ -113,6 +115,7 @@ public:
   static constexpr uint8_t CMD_SET_LIGHT_THRESHOLD = 0x88;
   static constexpr uint8_t CMD_SET_DETECT_RANGE = 0x86;
   static constexpr uint8_t CMD_SET_DISTANCE_DOOR = 0x62;
+  static constexpr uint8_t CMD_ENVIRNMENT_CALIBRATION = 0x60;
   static constexpr uint8_t CMD_TARGET_DISAPPEAR_DELAY = 0x84;
   static constexpr uint8_t SUCCEED = 0x01;
   static constexpr uint8_t NO_TARGET = 0;
@@ -139,10 +142,23 @@ public:
     return state.energy > 0;
   }
 
+  // Some C4002 packets report a target state but leave distance and energy at zero.
+  // Treat those as invalid occupancy packets so the code does not publish bogus zero readings.
+  static bool isInvalidOccupancyPacket(const C4002State &state) {
+    if (!state.valid || !isRecognizedTargetState(state.target_state)) {
+      return false;
+    }
+
+    if (state.target_state != PRESENCE && state.target_state != MOTION) {
+      return false;
+    }
+
+    return state.distance_cm == 0 || state.distance_cm > 1100 || state.energy == 0;
+  }
+
   enum LedMode : uint8_t {
     LED_OFF = 0x00,
-    LED_ON = 0x01,
-    LED_KEEP = 0xFF,
+    LED_ON = 0x01,    
   };
 
   enum ResolutionMode : uint8_t {
@@ -161,6 +177,8 @@ public:
     uint32_t notifications_seen = 0;
     uint32_t result_notes_parsed = 0;
     uint32_t calibration_notes_seen = 0;
+    uint32_t header_resync_shifts = 0;
+    uint32_t packet_timeouts = 0;
     uint32_t rejected_bad_len = 0;
     uint32_t rejected_bad_resp = 0;
     uint32_t rejected_unknown_note = 0;
@@ -183,7 +201,6 @@ public:
       return false;
     }
 
-    serial_->flush();
     serial_->end();
     delay(150);
     serial_->begin(baudRate_, SERIAL_8N1, rxPin_, txPin_);
@@ -196,23 +213,61 @@ public:
     };
 
     bool ok = true;
-    ok = setRunLedState(LED_ON) && ok;
-    ok = setOutLedState(LED_ON) && ok;
+    const LedMode runLedMode = C4002_ENABLE_RUN_LED ? LED_ON : LED_OFF;
+    const LedMode outLedMode = C4002_ENABLE_OUT_LED ? LED_ON : LED_OFF;
+    ok = setRunLedState(runLedMode) && ok;
+    ok = setOutLedState(outLedMode) && ok;
     ok = setResolutionMode(RESOLUTION_80CM) && ok;
-    ok = setOutPinMode(OUT_PIN_MODE3) && ok;
+    const OutPinMode outPinMode = static_cast<OutPinMode>(C4002_OUT_PIN_MODE);
+    ok = setOutPinMode(outPinMode) && ok;
     ok = setLightThresh(0.0f) && ok;
     ok = configureGate(0x00, gateState15, 15) && ok;
     ok = configureGate(0x01, gateState15, 15) && ok;
-    ok = setTargetDisappearDelay(60) && ok;
-    ok = setDetectRange(0, 1100) && ok;
+    ok = setTargetDisappearDelay(C4002_TARGET_DISAPPEAR_DELAY_SECONDS) && ok;
+    ok = setDetectRange(C4002_DETECT_RANGE_NEAR_CM, C4002_DETECT_RANGE_FAR_CM) && ok;
     ok = setReportPeriod(50) && ok;
 
     return ok;
   }
 
-  // Detect a sensor state that looks like a reset or invalid all-zero packet instead of a real reading.
+  // Trigger the C4002's built-in environment calibration sequence.
+  // The sensor learns the room background while empty and generates thresholds internally.
+  bool calibrateEnvironment(uint16_t startDelaySeconds, uint16_t calibrationSeconds) {
+    if (serial_ == nullptr) {
+      return false;
+    }
+
+    uint8_t payload[9] = {
+      CMD_ENVIRNMENT_CALIBRATION,
+      0x00,
+      0x09, 0x00,
+      uint8_t(startDelaySeconds & 0xFF),
+      uint8_t((startDelaySeconds >> 8) & 0xFF),
+      uint8_t(calibrationSeconds & 0xFF),
+      uint8_t((calibrationSeconds >> 8) & 0xFF),
+      0x01,
+    };
+
+    if (!sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST)) {
+      return false;
+    }
+
+    Serial.printf("C4002 calibration started: delay=%us duration=%us\n",
+                  startDelaySeconds,
+                  calibrationSeconds);
+    return true;
+  }
+
+  // Detect a sensor state that looks like an invalid all-zero packet.
+  // A NO_TARGET report can legitimately have motion=0, presence=0, distance=0, and energy=0,
+  // so we only treat all-zero packets as invalid when target_state is not one of the documented values.
   static bool isZeroedState(const C4002State &state) {
-    return state.valid && !state.motion && !state.presence && state.distance_cm == 0 && state.energy == 0;
+    return state.valid &&
+           !isRecognizedTargetState(state.target_state) &&
+           !state.motion &&
+           !state.presence &&
+           state.distance_cm == 0 &&
+           state.energy == 0;
   }
 
   // Configure how often the C4002 emits report frames to the UART bus.
@@ -227,16 +282,14 @@ public:
     return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
   }
 
-  // Turn the run LED on or off to indicate the sensor is active or idle.
+  // Turn the run LED on or off while preserving the current output LED state.
   bool setRunLedState(LedMode mode) {
-    uint8_t payload[6] = {CMD_SET_LED_MODE, 0x00, 0x06, 0x00, uint8_t(mode), LED_KEEP};
-    return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
+    return setLedState(mode, outLedMode_);
   }
 
-  // Set the output LED state used by the sensor's reporting behavior.
+  // Set the output LED state while preserving the current run LED state.
   bool setOutLedState(LedMode mode) {
-    uint8_t payload[6] = {CMD_SET_LED_MODE, 0x00, 0x06, 0x00, LED_KEEP, uint8_t(mode)};
-    return sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST);
+    return setLedState(runLedMode_, mode);
   }
 
   // Configure which output pin mode the C4002 uses for target events.
@@ -337,7 +390,28 @@ private:
   uint8_t rxPin_ = 18;
   uint8_t txPin_ = 17;
   uint32_t baudRate_ = 115200;
+  LedMode runLedMode_ = LED_OFF;
+  LedMode outLedMode_ = LED_OFF;
   Diagnostics diagnostics_ = {};
+
+  bool setLedState(LedMode runMode, LedMode outMode) {
+    const uint8_t payload[6] = {
+      CMD_SET_LED_MODE,
+      0x00,
+      0x06,
+      0x00,
+      uint8_t(runMode),
+      uint8_t(outMode)
+    };
+
+    if (!sendCommand(payload, sizeof(payload), FRAME_TYPE_WRITE_REQUEST)) {
+      return false;
+    }
+
+    runLedMode_ = runMode;
+    outLedMode_ = outMode;
+    return true;
+  }
 
   // Build and send a framed write/read request to the C4002 and wait for the acknowledgement response.
   bool sendCommand(const uint8_t *payload, size_t payloadLen, uint8_t frameType) {
@@ -403,56 +477,106 @@ private:
     actualLen = 0;
 
     while ((millis() - startMs) < timeoutMs) {
-      while (serial_->available() >= 8) {
-        uint8_t header[8] = {0};
-        for (size_t i = 0; i < 8; ++i) {
-          int value = serial_->read();
-          if (value < 0) {
-            break;
-          }
-          header[i] = uint8_t(value);
-        }
+      if (serial_->available() == 0) {
+        delay(1);
+        continue;
+      }
 
-        if (header[0] != FRAME_HEADER_1 || header[1] != FRAME_HEADER_2 ||
-            header[2] != FRAME_HEADER_3 || header[3] != FRAME_HEADER_4) {
+      uint8_t header4[4] = {0};
+      size_t matchedHeaderBytes = 0;
+      while ((millis() - startMs) < timeoutMs) {
+        if (serial_->available() == 0) {
+          delay(1);
           continue;
         }
 
-        const uint16_t packetLen = uint16_t(header[4] | (header[5] << 8));
-        if (packetLen < 10 || packetLen > bufferLen) {
-          // Ignore malformed length and keep searching for a valid frame header.
+        const int value = serial_->read();
+        if (value < 0) {
           continue;
         }
 
-        for (size_t i = 0; i < 8; ++i) {
-          buffer[i] = header[i];
+        header4[0] = header4[1];
+        header4[1] = header4[2];
+        header4[2] = header4[3];
+        header4[3] = uint8_t(value);
+        if (matchedHeaderBytes < 4) {
+          matchedHeaderBytes++;
         }
 
-        size_t remaining = packetLen - 8;
-        size_t offset = 8;
-        while (remaining > 0 && (millis() - startMs) < timeoutMs) {
-          if (serial_->available() == 0) {
-            delay(1);
-            continue;
-          }
-
-          int value = serial_->read();
-          if (value < 0) {
-            continue;
-          }
-
-          buffer[offset++] = uint8_t(value);
-          --remaining;
+        if (matchedHeaderBytes == 4 &&
+            header4[0] == FRAME_HEADER_1 &&
+            header4[1] == FRAME_HEADER_2 &&
+            header4[2] == FRAME_HEADER_3 &&
+            header4[3] == FRAME_HEADER_4) {
+          break;
         }
 
-        if (remaining == 0) {
-          actualLen = packetLen;
-          return true;
+        if (matchedHeaderBytes == 4) {
+          diagnostics_.header_resync_shifts++;
         }
       }
-      delay(1);
+
+      if (matchedHeaderBytes < 4 ||
+          header4[0] != FRAME_HEADER_1 || header4[1] != FRAME_HEADER_2 ||
+          header4[2] != FRAME_HEADER_3 || header4[3] != FRAME_HEADER_4) {
+        break;
+      }
+
+      for (size_t i = 0; i < 4; ++i) {
+        buffer[i] = header4[i];
+      }
+
+      size_t preambleRemaining = 4;
+      size_t preambleOffset = 4;
+      while (preambleRemaining > 0 && (millis() - startMs) < timeoutMs) {
+        if (serial_->available() == 0) {
+          delay(1);
+          continue;
+        }
+
+        const int value = serial_->read();
+        if (value < 0) {
+          continue;
+        }
+
+        buffer[preambleOffset++] = uint8_t(value);
+        --preambleRemaining;
+      }
+
+      if (preambleRemaining > 0) {
+        continue;
+      }
+
+      const uint16_t packetLen = uint16_t(buffer[4] | (buffer[5] << 8));
+      if (packetLen < 10 || packetLen > bufferLen) {
+        // Ignore malformed length and keep searching for the next valid header.
+        continue;
+      }
+
+      size_t remaining = packetLen - 8;
+      size_t offset = 8;
+      while (remaining > 0 && (millis() - startMs) < timeoutMs) {
+        if (serial_->available() == 0) {
+          delay(1);
+          continue;
+        }
+
+        const int value = serial_->read();
+        if (value < 0) {
+          continue;
+        }
+
+        buffer[offset++] = uint8_t(value);
+        --remaining;
+      }
+
+      if (remaining == 0) {
+        actualLen = packetLen;
+        return true;
+      }
     }
 
+    diagnostics_.packet_timeouts++;
     return actualLen > 0;
   }
 
@@ -506,14 +630,38 @@ private:
 
     const uint8_t *data = &packet[12];
 
+    struct C4002RawResult {
+      uint8_t target_status;
+      uint16_t light;
+      uint32_t exist_dist_index;
+      uint16_t exist_count_down;
+      uint16_t exist_target_dist;
+      uint8_t exist_target_energy;
+      uint16_t move_target_dist;
+      int16_t move_target_speed;
+      uint8_t move_target_energy;
+      uint8_t move_target_direction;
+    } __attribute__((packed));
+
+    C4002RawResult raw = {};
+    if (dataLen < sizeof(raw) + 4U) {
+      diagnostics_.rejected_bad_len++;
+      return false;
+    }
+    memcpy(&raw, data, sizeof(raw));
+
     state.valid = true;
     state.note_type = noteCmd;
-    state.target_state = data[0];
-    state.light_lux = float(uint16_t(data[1] | (data[2] << 8))) * 0.1f;
-    state.distance_cm = uint16_t(data[9] | (data[10] << 8));
-    state.energy = data[16];
+    state.target_state = raw.target_status;
+    state.light_lux = float(raw.light) * 0.1f;
+    state.presence_distance_cm = raw.exist_target_dist;
+    state.presence_energy = raw.exist_target_energy;
+    state.motion_distance_cm = raw.move_target_dist;
+    state.motion_energy = raw.move_target_energy;
 
     if (!isRecognizedTargetState(state.target_state)) {
+      state.distance_cm = 0;
+      state.energy = 0;
       state.motion = false;
       state.presence = false;
       diagnostics_.result_notes_parsed++;
@@ -522,6 +670,18 @@ private:
 
     state.motion = (state.target_state == MOTION);
     state.presence = (state.target_state == PRESENCE || state.target_state == MOTION);
+
+    if (state.target_state == MOTION) {
+      state.distance_cm = state.motion_distance_cm;
+      state.energy = state.motion_energy;
+    } else if (state.target_state == PRESENCE) {
+      state.distance_cm = state.presence_distance_cm;
+      state.energy = state.presence_energy;
+    } else {
+      state.distance_cm = 0;
+      state.energy = 0;
+    }
+
     diagnostics_.result_notes_parsed++;
 
     return true;
@@ -858,27 +1018,19 @@ bool occupancyEdgeStateInitialized = false;
 bool lastRecordedOccupiedState = false;
 bool occupancyDebounceInitialized = false;
 bool debouncedOccupiedState = false;
-uint8_t occupancyStateChangeVotes = 0;
+uint8_t c4002ZeroedFrameCount = 0;
+uint32_t c4002LastZeroedFrameMs = 0;
+constexpr uint8_t C4002_ZEROED_REINIT_THRESHOLD = 3;
+constexpr uint32_t C4002_ZEROED_REINIT_WINDOW_MS = 4000UL;
 
 bool applyOccupancyDebounce(bool rawOccupied) {
   if (!occupancyDebounceInitialized) {
     debouncedOccupiedState = rawOccupied;
     occupancyDebounceInitialized = true;
-    occupancyStateChangeVotes = 0;
     return debouncedOccupiedState;
   }
 
-  if (rawOccupied == debouncedOccupiedState) {
-    occupancyStateChangeVotes = 0;
-    return debouncedOccupiedState;
-  }
-
-  occupancyStateChangeVotes++;
-  if (occupancyStateChangeVotes >= 2) {
-    debouncedOccupiedState = rawOccupied;
-    occupancyStateChangeVotes = 0;
-  }
-
+  debouncedOccupiedState = rawOccupied;
   return debouncedOccupiedState;
 }
 
@@ -1504,15 +1656,15 @@ void setupMcpHttpServer() {
     return;
   }
 
-  mcpHttpServer.on("/context", HTTP_METHOD_GET, []() {
+  mcpHttpServer.on("/context", []() {
     mcpHttpServer.send(200, "application/json", buildContextJson());
   });
 
-  mcpHttpServer.on("/occupancy/history", HTTP_METHOD_GET, []() {
+  mcpHttpServer.on("/occupancy/history", []() {
     mcpHttpServer.send(200, "application/json", buildOccupancyHistoryJson());
   });
 
-  mcpHttpServer.on("/mcp", HTTP_METHOD_POST, handleMcpPost);
+  mcpHttpServer.on("/mcp", handleMcpPost);
 
   mcpHttpServer.onNotFound([]() {
     mcpHttpServer.send(404, "application/json", "{\"error\":\"not found\"}");
@@ -1611,7 +1763,21 @@ void printSensorSnapshot(const SensorSnapshot &s) {
   const float temperatureF = (s.temperature_c * 9.0f / 5.0f) + 32.0f;
   const float pressureInHg = s.pressure_hpa * 0.0295299830714f;
 
-  Serial.printf("C4002 present=%d motion=%d static=%d dist=%.2fft energy=%d light=%.1flux\n",
+  const bool rawPresent =
+    lastC4002State.valid && (lastC4002State.target_state == C4002Driver::PRESENCE);
+  const bool rawMotion =
+    lastC4002State.valid && (lastC4002State.target_state == C4002Driver::MOTION);
+
+  Serial.printf("C4002 raw present=%d motion=%d valid=%d target=%u dist_cm=%u energy=%u light=%.1flux\n",
+                rawPresent ? 1 : 0,
+                rawMotion ? 1 : 0,
+                lastC4002State.valid ? 1 : 0,
+                static_cast<unsigned>(lastC4002State.target_state),
+                static_cast<unsigned>(lastC4002State.distance_cm),
+                static_cast<unsigned>(lastC4002State.energy),
+                lastC4002State.light_lux);
+
+  Serial.printf("C4002 filtered present=%d motion=%d static=%d dist=%.2fft energy=%d light=%.1flux\n",
                 s.c4002_present,
                 s.motion_detected,
                 s.static_presence,
@@ -1630,6 +1796,22 @@ void printSensorSnapshot(const SensorSnapshot &s) {
                 s.humidity_rh,
                 pressureInHg);
 
+}
+
+void printC4002Diagnostics(const char *reason) {
+  const C4002Driver::Diagnostics d = c4002Driver.diagnostics();
+  Serial.printf(
+    "C4002 diag (%s): packets=%lu notifications=%lu parsed=%lu calib_notes=%lu resync_shifts=%lu packet_timeouts=%lu bad_len=%lu bad_resp=%lu unknown_note=%lu\n",
+    reason != nullptr ? reason : "n/a",
+    static_cast<unsigned long>(d.packets_read),
+    static_cast<unsigned long>(d.notifications_seen),
+    static_cast<unsigned long>(d.result_notes_parsed),
+    static_cast<unsigned long>(d.calibration_notes_seen),
+    static_cast<unsigned long>(d.header_resync_shifts),
+    static_cast<unsigned long>(d.packet_timeouts),
+    static_cast<unsigned long>(d.rejected_bad_len),
+    static_cast<unsigned long>(d.rejected_bad_resp),
+    static_cast<unsigned long>(d.rejected_unknown_note));
 }
 
 // Arduino setup routine: initialize hardware, configure sensor drivers, and start network interfaces.
@@ -1668,16 +1850,19 @@ void setup() {
       C4002Driver::SUCCEED, C4002Driver::SUCCEED, C4002Driver::SUCCEED, C4002Driver::SUCCEED, C4002Driver::SUCCEED,
     };
 
-    if (!c4002Driver.setRunLedState(C4002Driver::LED_ON)) {
+    const auto c4002RunLedMode = C4002_ENABLE_RUN_LED ? C4002Driver::LED_ON : C4002Driver::LED_OFF;
+    const auto c4002OutLedMode = C4002_ENABLE_OUT_LED ? C4002Driver::LED_ON : C4002Driver::LED_OFF;
+    if (!c4002Driver.setRunLedState(c4002RunLedMode)) {
       Serial.println("C4002 run-led command failed");
     }
-    if (!c4002Driver.setOutLedState(C4002Driver::LED_ON)) {
+    if (!c4002Driver.setOutLedState(c4002OutLedMode)) {
       Serial.println("C4002 out-led command failed");
     }
     if (!c4002Driver.setResolutionMode(C4002Driver::RESOLUTION_80CM)) {
       Serial.println("C4002 resolution command failed");
     }
-    if (!c4002Driver.setOutPinMode(C4002Driver::OUT_PIN_MODE3)) {
+    const auto c4002OutPinMode = static_cast<C4002Driver::OutPinMode>(C4002_OUT_PIN_MODE);
+    if (!c4002Driver.setOutPinMode(c4002OutPinMode)) {
       Serial.println("C4002 out-pin-mode command failed");
     }
     if (!c4002Driver.setLightThresh(0.0f)) {
@@ -1689,11 +1874,18 @@ void setup() {
     if (!c4002Driver.configureGate(0x01, gateState15, 15)) {
       Serial.println("C4002 presence gate command failed");
     }
-    if (!c4002Driver.setTargetDisappearDelay(60)) {
+    if (!c4002Driver.setTargetDisappearDelay(C4002_TARGET_DISAPPEAR_DELAY_SECONDS)) {
       Serial.println("C4002 disappear-delay command failed");
     }
-    if (!c4002Driver.setDetectRange(0, 1100)) {
+    if (!c4002Driver.setDetectRange(C4002_DETECT_RANGE_NEAR_CM, C4002_DETECT_RANGE_FAR_CM)) {
       Serial.println("C4002 detect-range command failed");
+    }
+    if (C4002_RUN_ENVIRONMENT_CALIBRATION) {
+      if (!c4002Driver.calibrateEnvironment(5, 40)) {
+        Serial.println("C4002 sensor calibration failed");
+      }
+    } else {
+      Serial.println("BOOT: using C4002 default calibration values");
     }
     // Match device report cadence to loop cadence to avoid UART backlog.
     if (!c4002Driver.setReportPeriod(50)) {
@@ -1733,13 +1925,35 @@ void loop() {
 
   C4002State c4002State = {};
   if (c4002Driver.waitForNotification(c4002State, 120)) {
-    if (C4002Driver::isZeroedState(c4002State)) {
-      Serial.println("C4002 reported all-zero state; reinitializing UART and sensor configuration");
-      if (c4002Driver.reinitialize()) {
-        lastC4002State = {};
-        lastC4002UpdateMs = 0;
+    const bool zeroedStateDetected = C4002Driver::isZeroedState(c4002State);
+    const bool invalidOccupancyPacket = C4002Driver::isInvalidOccupancyPacket(c4002State);
+    if (zeroedStateDetected || invalidOccupancyPacket) {
+      const uint32_t nowMs = millis();
+      if (c4002LastZeroedFrameMs == 0 || (nowMs - c4002LastZeroedFrameMs) > C4002_ZEROED_REINIT_WINDOW_MS) {
+        c4002ZeroedFrameCount = 1;
+      } else if (c4002ZeroedFrameCount < 0xFF) {
+        c4002ZeroedFrameCount++;
+      }
+      c4002LastZeroedFrameMs = nowMs;
+
+      Serial.printf("C4002 reported invalid occupancy packet (state=%u dist_cm=%u energy=%u count=%u/%u)\n",
+                    static_cast<unsigned>(c4002State.target_state),
+                    static_cast<unsigned>(c4002State.distance_cm),
+                    static_cast<unsigned>(c4002State.energy),
+                    c4002ZeroedFrameCount,
+                    C4002_ZEROED_REINIT_THRESHOLD);
+
+      if (c4002ZeroedFrameCount >= C4002_ZEROED_REINIT_THRESHOLD) {
+        Serial.println("C4002 repeated invalid occupancy packets; reinitializing UART and sensor configuration");
+        printC4002Diagnostics("invalid-packet-reinit");
+        if (c4002Driver.reinitialize()) {
+          c4002ZeroedFrameCount = 0;
+          c4002LastZeroedFrameMs = 0;
+        }
       }
     } else {
+      c4002ZeroedFrameCount = 0;
+      c4002LastZeroedFrameMs = 0;
       lastC4002State = c4002State;
       lastC4002UpdateMs = millis();
     }
@@ -1764,19 +1978,26 @@ void loop() {
 
   const bool c4002StateFresh = (lastC4002State.valid && (nowMs - lastC4002UpdateMs) <= 90000UL);
   if (c4002StateFresh) {
-    const bool rawPresent = lastC4002State.presence && C4002Driver::hasValidOccupancyReading(lastC4002State);
+    const bool hasValidReading = C4002Driver::hasValidOccupancyReading(lastC4002State);
+    const bool rawPresent =
+      hasValidReading && (lastC4002State.target_state == C4002Driver::PRESENCE);
+    const bool rawMotion =
+      hasValidReading && (lastC4002State.target_state == C4002Driver::MOTION);
     const bool debouncedOccupied = applyOccupancyDebounce(rawPresent);
     snapshot.c4002_present = rawPresent;
     snapshot.occupied = debouncedOccupied;
-    snapshot.motion_detected = rawPresent && lastC4002State.motion;
-    snapshot.static_presence = rawPresent && lastC4002State.presence && !lastC4002State.motion;
-    snapshot.distance_m = float(lastC4002State.distance_cm) / 100.0f;
-    snapshot.energy_level = int(lastC4002State.energy);
+    snapshot.motion_detected = rawMotion;
+    snapshot.static_presence = rawPresent;
+    snapshot.distance_m = rawPresent ? (float(lastC4002State.distance_cm) / 100.0f) : 0.0f;
+    snapshot.energy_level = rawPresent ? int(lastC4002State.energy) : 0;
     snapshot.light_lux = lastC4002State.light_lux;
   } else if (lastC4002State.valid) {
     Serial.printf("C4002 stale for %lu ms; reinitializing\n",
                   static_cast<unsigned long>(nowMs - lastC4002UpdateMs));
+    printC4002Diagnostics("stale-reinit");
     if (c4002Driver.reinitialize()) {
+      c4002ZeroedFrameCount = 0;
+      c4002LastZeroedFrameMs = 0;
       lastC4002State = {};
       lastC4002UpdateMs = 0;
     }

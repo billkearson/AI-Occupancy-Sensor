@@ -129,6 +129,12 @@ The C4002 needed more power than the ESP32 could reliably provide through its GP
 
 This hardware arrangement was necessary to keep the C4002 stable while the ESP32 continued to act as the local controller, MQTT client, and MCP endpoint host.
 
+### Occupancy LED behavior
+
+The project does not drive an independent blue LED from an ESP32 GPIO pin. Instead, the firmware configures the C4002's native output behavior so the sensor's blue output indicator is enabled and reflects the occupancy state. The default output mode is `OUT_PIN_MODE3` via `C4002_OUT_PIN_MODE` in [config.h](config.h), which keeps the native output indicator active and visible while the C4002 maintains occupancy-following behavior.
+
+This behavior is intentional and is the expected source of the blue occupancy indicator on the C4002 hardware.
+
 ---
 
 ## 3.3 ENS160

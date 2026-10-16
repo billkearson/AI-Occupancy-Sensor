@@ -167,6 +167,8 @@ The power tap is a practical hardware workaround to keep the C4002 stable while 
 
 - No serial output: confirm the board profile is set to the ESP32-C6 and USB CDC is enabled.
 - C4002 not responding: verify UART wiring and confirm the sensor is receiving stable power from the USB 5V rail as noted in the power section above.
+- Brief false "unoccupied" entries with `distance_ft=0.00`, `energy=0`, and `light_lux=0.0`: the firmware now ignores transient all-zero C4002 packets and only reinitializes after repeated zeroed frames. If this still appears frequently, re-check C4002 power stability and UART wiring.
+- Blue occupancy LED not tracking occupancy: this project does not drive a separate ESP32 GPIO LED. The firmware configures the C4002's native output/LED behavior with `OUT_PIN_MODE3` and `LED_ON` so the built-in blue indicator remains enabled while the sensor follows occupancy state; if the blue indicator is not matching the room state, verify the C4002 sensor is still reporting valid motion/presence frames and that the sensor output wiring is correct.
 - Wi‑Fi not connecting: verify SSID/password in [config.h](config.h) and check that the board is on the correct network.
 - MCP requests failing: use POST with `Content-Type: application/json` and verify the JSON-RPC method names match the runtime implementation.
 - Sensor values look wrong: check calibration offsets in [config.h](config.h) and confirm the board and sensor are still physically connected.
@@ -240,6 +242,7 @@ Field notes:
 - `occupied`, `moving`, `stationary`, and `vent` are derived context-engine outputs.
 - `t=` shows timezone-adjusted wall-clock time when NTP is available, otherwise uptime milliseconds.
 - C4002 distance is displayed in feet (`ft`).
+- C4002 `dist`/`energy` map to the active target type (motion target values while moving, presence target values while static).
 - BME280 temperature is displayed in Fahrenheit (`F`).
 - BME280 pressure is displayed in inches of mercury (`inHg`).
 - C4002 intensity is labeled `energy` (renamed from `activity`).

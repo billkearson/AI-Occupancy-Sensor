@@ -1,0 +1,30 @@
+C4002 mmWave Motion & Static Presence
+https://github.com/DFRobot/DFRobot_C4002
+22mm wide  x 26mm height
+
+ENS160 A digital multi-gas sensor solution
+https://github.com/DFRobot/DFRobot_ENS160
+
+BME280 Temperature, humidity, and air pressure
+https://github.com/DFRobot/DFRobot_BME280
+
+28mm wide x 22mm height
+
+FireBeetle 2 ESP32-C6  160MHz RISC-V 32-bit processor, Wi-Fi 6, Bluetooth 5, Zigbee 3.0
+
+25.4mm wide x 60.0 mm height
+
+30mm deep
+
+The C4002 is 22mm wide x 26mm height.
+The ENS160/BME280 is 28mm wide x 22mm height
+The ESP32-C6 is 25.4mm wide x 60.0 mm height
+
+Standard Grid: 0.100 inches (2.54 mm) center-to-center spacing
+
+PCB Hole Size: Standard 0.025" square wrap pins or sockets onto a circuit board, a hole diameter of 0.040 inches (1.0 mm)
+
+
+
+
+

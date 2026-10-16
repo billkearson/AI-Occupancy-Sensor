@@ -1,0 +1,53 @@
+#######################################
+# Syntax Coloring DFRobot_C4002
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+DFRobot_C4002	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+setRunLedState	KEYWORD2
+setOutLedState	KEYWORD2
+setOutPinMode	KEYWORD2
+startEnvCalibration	KEYWORD2
+setDetectRange	KEYWORD2
+configureGate	KEYWORD2
+factoryReset	KEYWORD2
+setResolutionMode	KEYWORD2
+setReportPeriod	KEYWORD2
+setLightThresh	KEYWORD2
+setGateThresh  KEYWORD2
+setBaudrate	KEYWORD2
+getNoteInfo	KEYWORD2
+getTargetState	KEYWORD2
+getLightIntensity	KEYWORD2
+getPresenceGateIndex	KEYWORD2
+getPresenceTargetInfo	KEYWORD2
+getVersioninfo	KEYWORD2
+getMotionTargetInfo	KEYWORD2
+setLockTime	KEYWORD2
+setTargetDisappearDelay	KEYWORD2
+setSensitivity	KEYWORD2
+getLightThresh  KEYWORD2
+getDetectRange	KEYWORD2
+getTargetDisappearDelay	KEYWORD2
+getOutPinMode	KEYWORD2
+getResolutionMode	KEYWORD2
+getSensitivity	KEYWORD2
+getAllConfigParams	KEYWORD2
+getPresenceCountDown	KEYWORD2
+getDistanceGateThresh	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+SOFTWARE_VERSION	LITERAL1
+HARDWARE_VERSION	LITERAL1
